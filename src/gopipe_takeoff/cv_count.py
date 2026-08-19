@@ -32,11 +32,30 @@ logger = logging.getLogger("gopipe.cv_count")
 # 1ページで照合する記号種の上限（サーバレスの実行時間を守る）。超えた分は
 # ログに残して見送る（黙って諦めない）。
 MAX_KEYS_PER_PAGE = 6
-MAX_TEMPLATES_PER_KEY = 2
+MAX_TEMPLATES_PER_KEY = 3
 MIN_TEMPLATE_SIDE = 14   # これより小さい bbox は記号でなくノイズ
 MAX_TEMPLATE_SIDE = 220  # これより大きい bbox は「領域」であって記号ではない
-# ページが大きすぎるときは CV 用に縮小する（FFT のメモリと時間の上限）
+# ページが大きすぎるときは CV 用に縮小する（FFT のメモリと時間の上限）。
+# 🔴縮小は最後の手段: 0.75縮小で E2#20 の recall が 11→10 に落ちる実測がある。
+# A3 native(3310px) はこの上限に収まるので縮小されない。
 MAX_PAGE_EDGE = 3600
+
+# しきい値帯（実験B + パリティ実測 2026-08-20 で決めた値）:
+#   - 既定の0.80-0.65では「線と重なった個体」を永遠に落とす（E2#20が9/11で頭打ち）
+#   - 実験B（生の native 画像）では 0.50 まで有効だったが、パイプラインの画像は
+#     コントラスト強調＋鮮鋭化＋JPEG を通るためスコア分布が上へずれ、
+#     0.50 の段は偽物で溢れる（実測: E2 11→12、排煙口300角 4→16）。帯の低端は 0.55。
+#   - 高しきい値側だけの踊り場は「きれいな個体だけ見えている」状態と区別できない
+#     （資料④で 0.80/0.75 が 2,2 と偽の踊り場を作った。真値7）
+#     → 踊り場は帯の低端の件数と一致するときだけ信じる（下端アンカー）
+THRESHOLD_BAND = (0.70, 0.65, 0.60, 0.55)
+LOWER_BOUND_THR = 0.55
+# 同一記号の作図サイズ違い（300角/350角）は、多スケールでなく
+# 「実物から採った複数テンプレート＋中心距離NMSの統合」で吸収する（実験Bの結論5）。
+NMS_CENTER_PX = 25
+# 1テンプレートのヒットがこの数を超えたら毒テンプレート（ダクト片など反復模様を
+# 囲んだ bbox）とみなして棄てる。LLM の bbox は時々記号でない場所を囲む（実測）。
+RUNAWAY_HITS = 60
 
 
 def crop_template(image_bytes: bytes, bbox: tuple[float, float, float, float], *, pad: int = 4) -> bytes | None:
@@ -130,52 +149,191 @@ def recount(
         )
         work = sorted(work, key=lambda gr: min(r.confidence for r in gr[1]))[:MAX_KEYS_PER_PAGE]
 
+    import numpy as np
+    from PIL import Image
+
+    from .symbol_match import find_matches
+
     page_gray, shrink = _gray_array(page_image, max_edge=MAX_PAGE_EDGE)
     page_gray = preprocess(page_gray)
-    base_scales = (0.85, 1.0, 1.15)
-    scales = tuple(s * scale_hint * shrink for s in base_scales)
+    # テンプレートはタイル(ほぼ native dpi)から、ページ画像は used_dpi から来る。
+    # 倍率が違う環境ではテンプレート側を合わせる。同倍率なら1.0＝実験Bの推奨どおり
+    # 単一スケール（多スケールは所要5倍のわりに偽陽性を持ち込むだけだった）。
+    factor = scale_hint * shrink
+    nms_dist = NMS_CENTER_PX * max(factor, 0.5)
 
-    from .symbol_match import count_stable_fast
+    # 🔴同じ名前で寸法違いの記号（排煙口300角と350角）は、見積上は別行だが
+    # 形がほぼ同じで互いのテンプレートに引っかかる（実測: 350角の見本が300角を
+    # 4個拾い、350角1個の行へ「拾い漏れの疑い」の誤警報を出した）。
+    # → 名前単位でまとめて照合し、各ヒットは最もスコアの高い見本の行へ割り当てる。
+    supers: dict[tuple, list[tuple]] = {}
+    for g, _rows in work:
+        # g = ("spec", spec, unit, ...) | ("catname", cat, name, unit, ...) → 名前で束ねる
+        nkey = (_norm_name(_rows[0].name), _rows[0].unit)
+        supers.setdefault(nkey, []).append(g)
+    gmap = dict(work)
 
-    for g, rows in work:
-        name = rows[0].name
-        plateaus: list[int] = []
-        for tpl_bytes in pooled[g][:MAX_TEMPLATES_PER_KEY]:
-            tpl_gray, _ = _gray_array(tpl_bytes)
-            tpl_gray = preprocess(tpl_gray)
-            if min(tpl_gray.shape) < MIN_TEMPLATE_SIDE * min(scales):
-                continue
-            n, counts = count_stable_fast(page_gray, tpl_gray, scales=scales)
-            if n is not None:
-                plateaus.append(n)
-        if not plateaus:
-            notes.append(f"CV検算: {name} は踊り場なし＝数えられず（qty_cv は付けない）")
+    for nkey, gkeys in supers.items():
+        name = gmap[gkeys[0]][0].name
+        # (cx, cy, score, 所属グループ) — 所属は「どの行の見本が最も似たか」で決まる
+        peaks: list[tuple[float, float, float, tuple]] = []
+        used_tpls = 0
+        for g in gkeys:
+            for tpl_bytes in pooled[g][:MAX_TEMPLATES_PER_KEY]:
+                tpl_gray, _ = _gray_array(tpl_bytes)
+                tpl_gray = preprocess(tpl_gray)
+                if factor != 1.0:
+                    im = Image.fromarray(tpl_gray.astype("uint8"))
+                    tpl_gray = np.asarray(
+                        im.resize((max(4, int(im.width * factor)), max(4, int(im.height * factor)))),
+                        dtype=np.float64,
+                    )
+                th_, tw_ = tpl_gray.shape
+                if min(th_, tw_) < MIN_TEMPLATE_SIDE * 0.7:
+                    continue
+                hits = find_matches(page_gray, tpl_gray, threshold=min(THRESHOLD_BAND))
+                if len(hits) > RUNAWAY_HITS:
+                    notes.append(
+                        f"CV検算: {name} の見本1個が{len(hits)}ヒット＝反復模様を囲んだ毒見本とみなして除外"
+                    )
+                    continue
+                used_tpls += 1
+                peaks.extend((m.x + tw_ / 2, m.y + th_ / 2, m.score, g) for m in hits)
+        if not used_tpls:
+            notes.append(f"CV検算: {name} は使える見本なし＝照合せず")
             continue
-        if len(set(plateaus)) > 1:
-            # 同じ記号の別テンプレートで数が割れた＝安定していない。数字を出さない。
-            notes.append(f"CV検算: {name} はテンプレート間で不一致 {plateaus}＝数えられず")
-            continue
-        n = plateaus[0]
-        total = sum(r.quantity for r in rows)
-        for r in rows:
-            r.qty_cv = float(n)
+        # NMSで1記号=1ヒットに寄せる。残ったヒットの所属＝最良スコアの見本の行
+        peaks.sort(key=lambda t: -t[2])
+        merged: list[tuple[float, float, float, tuple]] = []
+        for cx, cy, sc, g in peaks:
+            if all((cx - mx) ** 2 + (cy - my) ** 2 > nms_dist * nms_dist for mx, my, _, _ in merged):
+                merged.append((cx, cy, sc, g))
+
+        # 🔴同名で寸法が近い変種（排煙口300角/350角=差16%）は、スコアでの行割り当てが
+        # 信用できない（見本の切れ方の綺麗さで勝敗が決まる。実測: 350角の見本が300角を
+        # 4個取り、350角の行に qty_cv=4 の嘘が立った）。差が25%未満なら行別の数字は
+        # 出さず、名前全体の合計だけを照合する。行別の種別付けは隣の文字（300×300等）を
+        # 読めるLLMの領分で、形しか見ないNCCの領分ではない。
+        tpl_sides: dict[tuple, float] = {}
+        for g in gkeys:
+            for tpl_bytes in pooled[g][:1]:
+                arr, _ = _gray_array(tpl_bytes)
+                tpl_sides[g] = (arr.shape[0] + arr.shape[1]) / 2
+        ambiguous = False
+        if len(gkeys) > 1 and tpl_sides:
+            side_vals = list(tpl_sides.values())
+            ambiguous = (max(side_vals) / max(min(side_vals), 1)) < 1.25
+
+        if ambiguous:
+            all_rows = [r for g in gkeys for r in gmap[g]]
+            counts = {t: sum(1 for _, _, sc, _ in merged if sc >= t) for t in THRESHOLD_BAND}
+            vals = list(counts.values())
+            _decide_name_total(all_rows, name, counts, vals, notes)
+        else:
+            for g in gkeys:
+                rows = gmap[g]
+                counts = {
+                    t: sum(1 for _, _, sc, mg in merged if mg == g and sc >= t)
+                    for t in THRESHOLD_BAND
+                }
+                vals = list(counts.values())  # 高→低の順
+                _decide(rows, name, counts, vals, notes, adopt, used_tpls)
+    return notes
+
+
+def _decide_name_total(rows, name, counts, vals, notes) -> None:
+    """寸法違いの変種が並ぶ同名記号: 名前全体の合計だけ照合し、行別の数字は出さない。"""
+    n = None
+    for i in range(len(vals) - 1):
+        if vals[i] == vals[i + 1] and vals[i] > 0 and vals[i] == vals[-1]:
+            n = vals[i]
+            break
+    total = sum(r.quantity for r in rows)
+    lower = counts[LOWER_BOUND_THR]
+    if n is not None:
         if abs(n - total) < 1e-9:
             for r in rows:
                 r.confidence = max(r.confidence, 0.85)
             notes.append(
-                f"CV検算: {name} 図面全体{n}個 = AI合計{total:g}個（{len(rows)}行・一致・確度0.85へ）"
+                f"CV検算: {name}（寸法違い{len(rows)}行の合計）図面全体{n}個 = AI合計{total:g}個・一致"
             )
-        elif n > total and adopt and len(plateaus) >= 2 and len(rows) == 1:
-            it = rows[0]
-            it.qty_vision = it.quantity
-            it.quantity = float(n)
-            it.source = "cv_count"
-            it.confidence = max(it.confidence, 0.8)
-            notes.append(f"CV検算: {name} = {n}個を採用（AIは{it.qty_vision:g}個＝見落とし・見本{len(plateaus)}個一致）")
         else:
             for r in rows:
                 r.confidence = min(r.confidence, 0.6)
             notes.append(
-                f"CV検算: {name} AI合計{total:g}個 vs 機械{n}個で不一致（上書きせず要確認・{len(rows)}行）"
+                f"CV検算: {name}（寸法違い{len(rows)}行の合計）AI合計{total:g}個 vs 機械{n}個で不一致"
+                f"（行別の内訳は寸法表記の目視で・要確認）"
             )
-    return notes
+    elif lower > total and lower <= 5 * max(total, 1) + 10:
+        for r in rows:
+            r.confidence = min(r.confidence, 0.6)
+        notes.append(
+            f"CV検算: {name}（寸法違い{len(rows)}行の合計）確実なヒットだけで{lower}個 > "
+            f"AI合計{total:g}個＝拾い漏れの疑い（要確認・{counts}）"
+        )
+    elif lower > total:
+        notes.append(
+            f"CV検算: {name}（寸法違い{len(rows)}行）は見本がヒットしすぎ（{lower}個）＝照合不能とする"
+        )
+    else:
+        notes.append(f"CV検算: {name}（寸法違い{len(rows)}行）は数えられず（{counts}）")
+
+
+def _norm_name(s: str) -> str:
+    import unicodedata
+
+    return unicodedata.normalize("NFKC", s or "").replace(" ", "").replace("　", "").lower()
+
+
+def _decide(rows, name, counts, vals, notes, adopt, used_tpls) -> None:
+    """1つの行グループ（name×spec×unit）の照合結果を確定する。"""
+    # 下端アンカー付きの踊り場: 隣接一致 かつ その値が帯の低端の件数と同じときだけ信じる
+    n = None
+    for i in range(len(vals) - 1):
+        if vals[i] == vals[i + 1] and vals[i] > 0 and vals[i] == vals[-1]:
+            n = vals[i]
+            break
+    total = sum(r.quantity for r in rows)
+    lower = counts[LOWER_BOUND_THR]
+    spec = rows[0].spec or ""
+    label = f"{name} {spec}".strip()
+    if n is None:
+        # 下限警報の正気度: 見本が反復模様（ダクト片など）だと下限が跳ね上がる
+        # （実測: 250φダクト片の見本で58ヒット→「拾い漏れの疑い58個」という無意味な警報）。
+        # AI合計の5倍+10 を超える下限は見本の質を疑い、警報でなく照合不能として返す。
+        sane_cap = 5 * max(total, 1) + 10
+        if lower > total and lower <= sane_cap:
+            for r in rows:
+                r.confidence = min(r.confidence, 0.6)
+            notes.append(
+                f"CV検算: {label} は踊り場なし。ただし確実なヒットだけで{lower}個 > "
+                f"AI合計{total:g}個＝拾い漏れの疑い（要確認・{counts}）"
+            )
+        elif lower > sane_cap:
+            notes.append(
+                f"CV検算: {label} は見本がヒットしすぎ（{lower}個）＝見本の質を疑い照合不能とする"
+            )
+        else:
+            notes.append(f"CV検算: {label} は踊り場なし＝数えられず（{counts}）")
+        return
+    for r in rows:
+        r.qty_cv = float(n)
+    if abs(n - total) < 1e-9:
+        for r in rows:
+            r.confidence = max(r.confidence, 0.85)
+        notes.append(
+            f"CV検算: {label} 図面全体{n}個 = AI合計{total:g}個（{len(rows)}行・一致・確度0.85へ）"
+        )
+    elif n > total and adopt and used_tpls >= 2 and len(rows) == 1:
+        it = rows[0]
+        it.qty_vision = it.quantity
+        it.quantity = float(n)
+        it.source = "cv_count"
+        it.confidence = max(it.confidence, 0.8)
+        notes.append(f"CV検算: {label} = {n}個を採用（AIは{it.qty_vision:g}個＝見落とし・見本{used_tpls}個）")
+    else:
+        for r in rows:
+            r.confidence = min(r.confidence, 0.6)
+        notes.append(
+            f"CV検算: {label} AI合計{total:g}個 vs 機械{n}個で不一致（上書きせず要確認・{len(rows)}行）"
+        )
