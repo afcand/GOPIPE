@@ -46,6 +46,10 @@ class TakeoffItem(BaseModel):
     #   "estimate" … 根拠が弱い推定（要検算。確度は 0.45 で頭打ちにする）
     #   "none"     … 数量を出せなかった（quantity=0）
     qty_basis: str | None = None
+    # 記号テンプレート照合（CV）が数えた個数。LLMの計数は同じ図面を2回かけると
+    # 6/11 しか一致しない（実測2026-08-20）ため、決定的アルゴリズムの数を併記する。
+    # None = 照合していない/踊り場が無く数えられなかった（そのときは数字を出さない）。
+    qty_cv: float | None = None
 
 
 class Tile(BaseModel):

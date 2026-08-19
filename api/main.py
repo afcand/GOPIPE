@@ -84,6 +84,7 @@ def _items_json(items) -> list[dict]:
             # 数量の出所（表/計数/寸法/推定/未取得）。これを落とすと、画面と
             # Web経由の Excel から「確かな数」と「推定」の区別が消える。
             "qty_basis": it.qty_basis,
+            "qty_cv": it.qty_cv,
             "source": it.source,
             "checks": flags.get(i, []),
             # 学習の鍵。表示名を鍵にすると、直すたびに別部材まで巻き添えで化ける。
@@ -582,6 +583,7 @@ async def export_xlsx(payload: dict = Body(...)):
             # 画面で確定した明細を Excel にするとき、出所を運ばないと
             # 備考の「図面の表から／🔴AI推定（要検算）」が全部消える。
             qty_basis=(r.get("qty_basis") or None),
+            qty_cv=(float(r["qty_cv"]) if r.get("qty_cv") is not None else None),
             source=(r.get("source") or None),
         )
         for r in rows

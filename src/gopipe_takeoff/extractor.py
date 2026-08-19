@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from llm_client import LLMClient, LLMMessage, get_llm_client
@@ -379,6 +381,9 @@ def _tile_user_text(page: DrawingPage, tile: Tile, symbol_codes: list[str]) -> s
         f"{tile.row + 1}行目 {tile.col + 1}列目 (row={tile.row}, col={tile.col})\n"
         f"{core_rule}"
         f"この区画から拾い出し項目を JSON 配列で返してください。\n"
+        f"単位が「個」の行は bbox を必ず入れてください: その記号の**代表1個だけ**を"
+        f"ぴったり囲む [x0,y0,x1,y1]（この画像のピクセル座標）。複数個をまとめて囲まない。"
+        f"機械照合が同じ絵を数えるための見本に使います（見本が正確なほど検算が効きます）。\n"
         f"テキスト層 (ページ全体): {(page.text or '(なし)')[:2000]}"
         f"{codes_hint}"
     )
@@ -430,6 +435,25 @@ def _verification_user_text(
     )
 
 
+def _harvest_template(templates: dict[tuple, list[bytes]], it: TakeoffItem, tile: Tile) -> None:
+    """タイルのLLM検出（bbox付き・単位=個）から記号テンプレートを切り出して貯める。
+
+    CV検算（cv_count.recount）の入力。ここで採るのは「LLMが個数モノだと判定した
+    領域の見た目」であって、正しさはこの時点では問わない（数えるのは踊り場判定側）。
+    """
+    if it.unit != "個" or it.bbox is None:
+        return
+    key = _item_key(it)
+    bucket = templates.setdefault(key, [])
+    if len(bucket) >= 3:
+        return
+    from .cv_count import crop_template
+
+    crop = crop_template(tile.image_png, (it.bbox.x0, it.bbox.y0, it.bbox.x1, it.bbox.y1))
+    if crop:
+        bucket.append(crop)
+
+
 def extract(
     drawing: Drawing,
     *,
@@ -463,29 +487,46 @@ def extract(
             logger.info("page %d: %d symbol codes detected in text layer", page.page, len(symbol_codes))
 
         # ---- Pass 1: 通常抽出 ----
+        templates: dict[tuple, list[bytes]] = {}
         if page.tiles:
             tile_items: list[TakeoffItem] = []
-            for tile in page.tiles:
+
+            def _one_tile(tile: Tile) -> tuple[Tile, list[TakeoffItem] | None, str | None]:
                 logger.info(
                     "page %d: extracting tile (r=%d, c=%d) of %d行×%d列",
                     page.page, tile.row, tile.col, tile.n_rows, tile.n_cols,
                 )
                 try:
-                    tile_items.extend(
-                        _call_llm_for_image(
-                            client,
-                            system_prompt,
-                            image_png=tile.image_png,
-                            user_text=_tile_user_text(page, tile, symbol_codes),
-                            page_number=page.page,
-                            drop_bbox=True,
-                        )
+                    got = _call_llm_for_image(
+                        client,
+                        system_prompt,
+                        image_png=tile.image_png,
+                        user_text=_tile_user_text(page, tile, symbol_codes),
+                        page_number=page.page,
+                        # bbox はテンプレート採取に使う（採取後に必ず捨てる）
+                        drop_bbox=False,
                     )
+                    return tile, got, None
                 except ExtractionFailed as e:
                     # このタイルだけ諦める。他のタイルの結果は捨てない。
-                    logger.error("page %d: タイル(r=%d,c=%d)を読み取れず: %s", page.page, tile.row, tile.col, e)
+                    return tile, None, str(e)
+
+            # タイルは互いに独立なので並列で読む。直列だと6タイルで70〜90秒かかり、
+            # CV検算や将来の検証パスに使う時間予算が残らない（実測: 並列で約1/4）。
+            workers = min(len(page.tiles), int(os.environ.get("GOPIPE_TILE_CONCURRENCY", "6")))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(_one_tile, page.tiles))
+            for tile, got, err in results:
+                if err is not None:
+                    logger.error("page %d: タイル(r=%d,c=%d)を読み取れず: %s", page.page, tile.row, tile.col, err)
                     if failures is not None:
-                        failures.append(str(e))
+                        failures.append(err)
+                    continue
+                for it in got:
+                    _harvest_template(templates, it, tile)
+                    # タイル座標の bbox をページに載せると位置が嘘になるので捨てる
+                    it.bbox = None
+                tile_items.extend(got)
             before = len(tile_items)
             page_items = _merge_tile_items(tile_items)
             logger.info("page %d: pass1 %d行 → %d行（タイル間は合算）", page.page, before, len(page_items))
@@ -530,6 +571,23 @@ def extract(
             before = len(combined)
             page_items = _dedupe_items(combined)
             logger.info("page %d: after dedup %d → %d items", page.page, before, len(page_items))
+
+        # ---- 個数モノのCV検算（記号テンプレート照合で数え直す）----
+        if templates and page.image_png:
+            try:
+                from .cv_count import recount
+
+                # タイルはほぼ原寸(native dpi)、ページ画像は used_dpi。倍率が違う環境でも
+                # テンプレートの縮尺が合うよう、実測の幅比からヒントを渡す。
+                row0 = [t for t in page.tiles if t.row == 0]
+                tiled_w = sum((t.core[2] - t.core[0]) * t.width for t in row0)
+                hint = (page.width / tiled_w) if tiled_w else 1.0
+                for note in recount(
+                    page.image_png, page_items, templates, item_key=_item_key, scale_hint=hint
+                ):
+                    logger.info("page %d: %s", page.page, note)
+            except Exception as e:  # noqa: BLE001  検算層の失敗で抽出を道連れにしない
+                logger.warning("page %d: CV検算をスキップ（%s）", page.page, e)
 
         # ---- 機器表テキスト層との突合（確定情報を優先）----
         if use_text_table:

@@ -34,6 +34,24 @@ def test_items_json_carries_qty_basis():
     assert [r["qty_basis"] for r in rows] == ["table", "estimate"]
 
 
+def test_items_json_and_export_carry_qty_cv():
+    """機械計数(qty_cv)も同じ罠を踏まないよう固定する（シリアライザが落とすと画面に届かない）。"""
+    from api.main import _items_json
+
+    it = _item("count")
+    it.qty_cv = 3.0
+    rows = _items_json([it])
+    assert rows[0]["qty_cv"] == 3.0
+    rebuilt = TakeoffItem(
+        page=1, name=rows[0]["name"], spec=rows[0].get("spec"),
+        quantity=float(rows[0]["quantity"]), unit=rows[0]["unit"],
+        confidence=float(rows[0]["confidence"]),
+        qty_basis=(rows[0].get("qty_basis") or None),
+        qty_cv=(float(rows[0]["qty_cv"]) if rows[0].get("qty_cv") is not None else None),
+    )
+    assert rebuilt.qty_cv == 3.0
+
+
 def test_export_payload_round_trips_qty_basis_into_note():
     """API の出力をそのまま /export/xlsx に戻したとき、備考が復元されること。"""
     from api.main import _items_json

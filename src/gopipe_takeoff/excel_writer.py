@@ -31,6 +31,13 @@ def _note(it: TakeoffItem) -> str:
     basis = _BASIS_NOTE.get(it.qty_basis or "")
     if basis:
         parts.append(basis)
+    if it.qty_cv is not None:
+        if it.source == "cv_count":
+            parts.append(f"機械計数{it.qty_cv:g}個を採用(AI読み{(it.qty_vision or 0):g}個)")
+        else:
+            # qty_cv は「同種記号の図面全体の機械計数」。行（場所ごと）と直接は比べない。
+            # 一致/不一致の判定は confidence に反映済み（一致=0.85へ・不一致=0.6以下）。
+            parts.append(f"機械計数(図面全体)={it.qty_cv:g}個")
     if it.source == "reconciled":
         parts.append("機器表で数量確定")
     elif it.source == "text_table":

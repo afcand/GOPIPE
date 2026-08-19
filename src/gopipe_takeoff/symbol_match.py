@@ -158,6 +158,27 @@ def count_matches(image, template, *, threshold: float = 0.8, scales: tuple[floa
     return best
 
 
+def count_stable_fast(
+    image, template, *, thresholds: tuple[float, ...] = (0.80, 0.75, 0.70, 0.65),
+    scales: tuple[float, ...] = (0.8, 0.9, 1.0, 1.1, 1.2),
+) -> tuple[int | None, dict[float, int]]:
+    """count_stable と同じ「踊り場」判定を、NCC計算1周で済ませる高速版。
+
+    count_stable はしきい値ごとに全スケールを回す（4×5=20回のNCC全面照合）ため、
+    A3全面では1テンプレート20秒級になりサーバレスの実行時間を食い潰す。
+    ここでは最小しきい値で一度だけピークを取り、しきい値は取ったピークの
+    スコア足切りとして適用する。NMSが1回になる分だけ厳密には近似だが、
+    離れて配置される記号スタンプの用途では踊り場判定は変わらない。
+    """
+    peaks = find_matches_multiscale(image, template, threshold=min(thresholds), scales=scales)
+    counts = {t: sum(1 for p in peaks if p.score >= t) for t in thresholds}
+    vals = list(counts.values())
+    for i in range(len(vals) - 1):
+        if vals[i] == vals[i + 1] and vals[i] > 0:
+            return vals[i], counts
+    return None, counts
+
+
 def count_stable(
     image, template, *, thresholds: tuple[float, ...] = (0.80, 0.75, 0.70, 0.65),
     scales: tuple[float, ...] = (0.8, 0.9, 1.0, 1.1, 1.2),
