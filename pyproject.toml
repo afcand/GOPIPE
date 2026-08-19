@@ -11,6 +11,9 @@ dependencies = [
     "anthropic>=0.40.0",
     "openai>=1.50.0",
     "pymupdf>=1.24.0",
+    # symbol_match.py（記号テンプレート照合）が必須とする。宣言が無く、
+    # クリーンな環境では import すら通らなかった＝機能が置物になっていた。
+    "numpy>=1.26",
     "openpyxl>=3.1.2",
     "pillow>=10.3.0",
     "pydantic>=2.7.0",

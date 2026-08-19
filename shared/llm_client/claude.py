@@ -6,6 +6,25 @@ import os
 from .base import LLMMessage, LLMResponse
 
 
+def _media_type(img: bytes) -> str:
+    """画像バイト列から media_type を判定する。
+
+    🔴 ここを "image/png" 固定にしていると、JPEG を送った瞬間に API 側で弾かれる。
+    スキャン図は PNG だと A3 200dpi で 7.6MB になり、byte 上限に当たって解像度が
+    自動降格していた（＝図面の表が読めなくなっていた）。JPEG なら 2.05MB で収まる。
+    送る形式を選べるようにするために、宣言も実体に合わせる必要がある。
+    """
+    if img[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if img[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if img[:4] == b"RIFF" and img[8:12] == b"WEBP":
+        return "image/webp"
+    if img[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/png"
+
+
 class ClaudeClient:
     name = "claude"
 
@@ -38,7 +57,7 @@ class ClaudeClient:
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": "image/png",
+                            "media_type": _media_type(img),
                             "data": base64.b64encode(img).decode("ascii"),
                         },
                     }

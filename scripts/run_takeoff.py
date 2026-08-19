@@ -53,8 +53,8 @@ def main() -> int:
     from gopipe_takeoff import run_takeoff
 
     result = run_takeoff(args.input, args.out, grid=args.grid, two_pass=args.two_pass)
-    n_calls = args.grid * args.grid + (1 if args.two_pass else 0)
-    print(f"✓ {len(result.items)} 件の拾い出し項目を抽出しました (LLM call ~{n_calls} 回)")
+    print(f"✓ {len(result.items)} 件の拾い出し項目を抽出しました "
+          f"(LLM call {result.llm_calls} 回)")
     print(f"  Excel: {result.excel_path}")
     if result.marker_pdf_path:
         print(f"  Marker PDF: {result.marker_pdf_path}")

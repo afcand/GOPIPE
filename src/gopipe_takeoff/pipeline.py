@@ -24,6 +24,9 @@ class TakeoffResult:
     items: list[TakeoffItem]
     excel_path: Path
     marker_pdf_path: Path | None
+    # 実際に走った LLM 呼び出し回数。自動タイル分割で毎回変わるため、
+    # 呼び出し側が grid から逆算すると必ずズレる（＝料金の説明が嘘になる）。
+    llm_calls: int = 0
     # 読み取れなかったページ・タイル。0件と「読めていない」を混同させないため、
     # 空リストでない限り必ず画面まで運ぶ。
     failures: list[str] = field(default_factory=list)
@@ -61,7 +64,10 @@ class TakeoffPipeline:
 
         logger.info("loading PDF: %s (grid=%d, two_pass=%s)", input_pdf, grid, two_pass)
         drawing = load_pdf(input_pdf, grid=grid)
-        logger.info("pages=%d", len(drawing.pages))
+        llm_calls = sum(len(p.tiles) or 1 for p in drawing.pages) + (
+            len(drawing.pages) if two_pass else 0
+        )
+        logger.info("pages=%d / LLM呼び出し予定=%d回", len(drawing.pages), llm_calls)
 
         logger.info("extracting items via LLM (use_text_table=%s) ...", use_text_table)
         failures: list[str] = []
@@ -100,7 +106,8 @@ class TakeoffPipeline:
                 marker_path = None
 
         return TakeoffResult(
-            items=items, excel_path=excel_path, marker_pdf_path=marker_path, failures=failures
+            items=items, excel_path=excel_path, marker_pdf_path=marker_path,
+            failures=failures, llm_calls=llm_calls,
         )
 
 

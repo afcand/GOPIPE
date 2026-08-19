@@ -1,17 +1,12 @@
 """F-13: 個数モノの数量潰れ回帰テスト。
 
-背景: extractor._dedupe_items は同一キー（spec×location 等）の項目を
-1 行に統合する際、confidence 最大の 1 行だけ残し **数量を合算しない**。
-これはタイル間／Pass 間で「同じ部材」が二重に来たときの正しい挙動だが、
-LLM が「同一種別×同一場所の設備」を個別行（quantity=1 を複数行）で返すと
-数量が実数より小さく潰れる。
+**同じ絵を2回読んだ結果**と**別々のタイルを読んだ結果**は、混ぜ方が逆になる。
+  - `_dedupe_items`    … 同じ絵の重複 → 合算しない（足すと倍になる）
+  - `_merge_tile_items`… 別タイルの同種 → **合算する**（別の場所にある別の実体）
 
-対策は prompts/extraction.txt 側で「同一 name×spec×location は 1 行に集約し
-quantity に合計を入れる」と明示すること（dedup 本体は触らない）。本テストは:
-  1) dedup が合算しない不変条件（プロンプトが集約を担う前提）
-  2) 集約規約に従えば extract() で総数量が保持されること
-  3) prompts/extraction.txt に集約ルールが入っていること
-を固定する。
+2026-08-19 まで両方が `_dedupe_items` だったため、タイル分割すると
+弁 3個+2個→3個、配管 12m+16.5m→12m と静かに過小計上していた。
+本テストはその区別を固定する。
 """
 from __future__ import annotations
 
@@ -25,7 +20,11 @@ sys.path.insert(0, str(ROOT / "shared"))
 
 from llm_client.base import LLMResponse  # noqa: E402
 
-from gopipe_takeoff.extractor import _dedupe_items, extract  # noqa: E402
+from gopipe_takeoff.extractor import (  # noqa: E402
+    _dedupe_items,
+    _merge_tile_items,
+    extract,
+)
 from gopipe_takeoff.models import Drawing, DrawingPage, TakeoffItem, Tile  # noqa: E402
 
 DUMMY_PNG = b"\x89PNG\r\n\x1a\n_dummy_"
@@ -59,7 +58,7 @@ def _total(items, name):
 
 
 # --------------------------------------------------------------------------
-# 1. 不変条件: dedup は同一キーを合算しない（個数モノ／長さモノとも keep-one）
+# 1. 不変条件: dedup（同じ絵の重複）は合算しない / merge（タイル間）は合算する
 # --------------------------------------------------------------------------
 def test_dedupe_keeps_one_and_does_not_sum_count_items():
     """同一 spec×location の弁が 5 個別行で来ると 1 行・quantity=最大conf行 になる。"""
@@ -99,6 +98,36 @@ def test_dedupe_keeps_distinct_specs_and_locations_separate():
     assert _total(deduped, "仕切弁") == 6
 
 
+def test_merge_tiles_sums_pipe_length_across_tiles():
+    """配管の延長はタイルを跨いで合算される（12m + 16.5m = 28.5m）。"""
+    merged = _merge_tile_items([
+        _item("給水管(SGP)", "VLP DN20", 12.0, "m", "1F 給水系統", conf=0.8),
+        _item("給水管(SGP)", "VLP DN20", 16.5, "m", "1F 給水系統", conf=0.6),
+    ])
+    assert len(merged) == 1
+    assert _total(merged, "給水管(SGP)") == 28.5
+
+
+def test_merge_tiles_does_not_mix_units():
+    """単位が違えば別行のまま（20m と 8m2 を足さない）。"""
+    merged = _merge_tile_items([
+        _item("ダクト", "400x400", 20.0, "m", "1F 空調"),
+        _item("ダクト", "400x400", 8.0, "m2", "1F 空調"),
+    ])
+    assert len(merged) == 2
+
+
+def test_merge_tiles_takes_weakest_basis():
+    """出所が混ざった合計は、一番弱い根拠で語る（表 + 推定 → 推定）。"""
+    a = _item("排煙口", "300x300", 4, "個", "3F")
+    a.qty_basis = "table"
+    b = _item("排煙口", "300x300", 1, "個", "3F")
+    b.qty_basis = "estimate"
+    merged = _merge_tile_items([a, b])
+    assert merged[0].quantity == 5
+    assert merged[0].qty_basis == "estimate"
+
+
 # --------------------------------------------------------------------------
 # 2. 契約: LLM が集約規約に従えば extract() で総数量が保持される
 # --------------------------------------------------------------------------
@@ -123,11 +152,11 @@ def test_consolidated_rows_preserve_total_through_tile_extract():
     assert _total(items, "90°エルボ") == 7
 
 
-def test_per_instance_rows_still_collapse_across_tiles():
-    """残課題の固定: 同一キーの個数モノがタイルを跨ぐと cross-tile dedup で潰れる。
+def test_per_instance_rows_sum_across_tiles():
+    """タイルを跨いだ同一キーの個数モノは **合算** される（旧: 潰れていた）。
 
-    プロンプト集約は『1 call 内』までしか効かない。grid>=2 で同一 spec×location が
-    複数タイルに散ると依然 keep-one になる（既定 grid=1 では発生しない）。
+    タイルは重なり部分を薄くして「担当領域にあるものだけ出す」ようにしてあるので、
+    別タイルの同じ弁は同じ実体ではなく別の実体＝足すのが正しい。
     """
     client = ScriptedClient([
         (lambda c: "col=0" in c, [
@@ -143,8 +172,10 @@ def test_per_instance_rows_still_collapse_across_tiles():
     t1 = Tile(image_png=DUMMY_PNG, row=0, col=1, grid=1, width=10, height=10)
     page = DrawingPage(page=1, width=100, height=100, text="", image_png=DUMMY_PNG, tiles=[t0, t1])
     items = extract(Drawing(source_path="x", pages=[page]), client=client, two_pass=False)
-    # 実数 5 だが cross-tile dedup で 3（最大 conf 行）に潰れる＝既知の残課題。
-    assert _total(items, "仕切弁") == 3
+    # 実数 5。かつて 3（最大 conf 行）に潰れていた回帰を止める。
+    assert _total(items, "仕切弁") == 5
+    # 合算した行の確度は「一番弱い根拠」に合わせる（0.8 ではなく 0.7）。
+    assert [it for it in items if it.name == "仕切弁"][0].confidence == 0.7
 
 
 # --------------------------------------------------------------------------

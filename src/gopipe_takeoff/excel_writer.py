@@ -12,17 +12,34 @@ from .models import TakeoffItem
 HEADER = ["No", "カテゴリ", "名称", "仕様", "場所", "数量", "単位", "ページ", "備考"]
 
 
+# 数量をどう出したか → 現場が読む日本語。「AIが出した数字」を一列で信用させないため、
+# 確かな数（表を読んだ）と当てずっぽう（推定）を必ず別の言葉で書く。
+_BASIS_NOTE = {
+    "table": "図面の表から（員数欄）",
+    # 実測(2026-08-20 ハルキ実図面): 同じ図面を2回かけると計数は 6/11 しか一致しない
+    # （排煙口 1→2、VD 2→1、吹出口 1→2）。表由来と同じ顔で並べてはいけない。
+    "count": "図面上で計数（要数え直し）",
+    "measure": "図面の寸法から計算",
+    "estimate": "🔴AI推定（要検算）",
+    "none": "数量は未取得（人が記入）",
+}
+
+
 def _note(it: TakeoffItem) -> str:
-    """備考列の文言。低信頼は要確認、機器表由来は確定根拠を示す。"""
-    if it.confidence < 0.7:
-        return f"要確認(信頼度{it.confidence:.2f})"
+    """備考列の文言。数量の出所を最優先で示し、低信頼は要確認を添える。"""
+    parts: list[str] = []
+    basis = _BASIS_NOTE.get(it.qty_basis or "")
+    if basis:
+        parts.append(basis)
     if it.source == "reconciled":
-        return "機器表で数量確定"
-    if it.source == "text_table":
-        return "機器表から抽出"
-    if it.source == "legend_count":
-        return "凡例から記号カウント"
-    return ""
+        parts.append("機器表で数量確定")
+    elif it.source == "text_table":
+        parts.append("機器表から抽出")
+    elif it.source == "legend_count":
+        parts.append("凡例から記号カウント")
+    if it.confidence < 0.7:
+        parts.append(f"要確認(信頼度{it.confidence:.2f})")
+    return " / ".join(parts)
 
 
 def write_excel(items: list[TakeoffItem], out_path: str | Path) -> Path:

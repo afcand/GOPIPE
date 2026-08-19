@@ -23,6 +23,12 @@ LEGEND_PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "legend.t
 DEFAULT_MAX_TOKENS    = 8192   # v1 は 4096 だったが A1 密度の高い図面で途中切れが発生
 VERIFY_MAX_TOKENS     = 4096
 
+# 数量の出所（models.TakeoffItem.qty_basis）。表>計数>寸法計算>推定 の順に確かさが下がる。
+_QTY_BASIS = ("table", "count", "measure", "estimate", "none")
+# 出所が混ざった行は「一番弱い根拠」で語る。強い方を採ると人が検算をやめる。
+_BASIS_DOUBT = {"table": 0, "count": 1, "measure": 2, "estimate": 3, "none": 4}
+ESTIMATE_MAX_CONFIDENCE = 0.45
+
 # テキスト層から記号コードを抽出する正規表現 (例: EI2-GR06, GR01, P02, LA04, SOK-A)
 _SYMBOL_CODE_RE = re.compile(r"\b([A-Z]{1,4}[0-9]{1,2}[-_]?[A-Z0-9]{0,4})\b")
 
@@ -106,16 +112,29 @@ def _parse_response(raw: str, *, page_number: int, drop_bbox: bool = False) -> l
             continue
         try:
             bbox_val = None if drop_bbox else row.get("bbox")
+            qty = float(row.get("quantity", 0) or 0)
+            basis = (row.get("qty_basis") or "").strip().lower() or None
+            if basis not in _QTY_BASIS:
+                basis = None
+            if qty == 0 and basis is None:
+                basis = "none"
+            conf = float(row.get("confidence", 1.0) or 1.0)
+            # 推定値に高い確度を持たせない。実測(2026-08-19)では推定の数量は
+            # 同じ図面を2回かけると動いた（25.0m→20.0m）。0.9 と並べて出すと
+            # 人が検算すべき行が「🟢そのままでOK」に化ける。
+            if basis == "estimate":
+                conf = min(conf, ESTIMATE_MAX_CONFIDENCE)
             items.append(
                 TakeoffItem(
                     page=row.get("page", page_number),
                     name=row.get("name", ""),
                     spec=row.get("spec"),
-                    quantity=float(row.get("quantity", 0) or 0),
+                    quantity=qty,
                     unit=row.get("unit", ""),
                     location=row.get("location"),
                     bbox=BBox.from_list(bbox_val) if bbox_val else None,
-                    confidence=float(row.get("confidence", 1.0) or 1.0),
+                    confidence=conf,
+                    qty_basis=basis,
                 )
             )
         except Exception:
@@ -172,23 +191,31 @@ def _norm(s: str | None) -> str:
     return unicodedata.normalize("NFKC", s).replace(" ", "").replace("　", "").lower()
 
 
+def _item_key(it: TakeoffItem) -> tuple:
+    """同一部材とみなす鍵。
+
+    単位を鍵に含めるのが要点。含めないと「ダクト400×400 を m で見た行」と
+    「同じものを m2 で見た行」が同じ鍵になり、20m と 8m2 を足す/選ぶという
+    意味の無い演算が起きる。単位が食い違うなら、それは人に見せるべき不一致。
+    """
+    loc = _norm(it.location)
+    unit = _norm(it.unit)
+    if it.spec and it.spec.strip():
+        return ("spec", _norm(it.spec), unit, loc)
+    return ("catname", _norm(it.category), _norm(it.name), unit, loc)
+
+
 def _dedupe_items(items: list[TakeoffItem]) -> list[TakeoffItem]:
-    """タイル間や Pass1/Pass2 間で重複した項目を除去する。
+    """**同じものが二重に来た**ときに 1 行へ寄せる（数量は合算しない）。
 
-    優先キー:
-      1. spec が非空: (spec, location)
-      2. spec なし   : (category, name, location)
-
-    重複時は confidence が高い方を残す（同点なら先勝ち）。
+    使う場面は「同じ絵をもう一度読んだ」結果を混ぜるとき（Pass1 と Pass2 など）。
+    同じ絵を2回読んで足したら倍になるので、confidence が高い方を残す。
+    タイル間は別物なので合算する（_merge_tile_items）。混同しないこと。
     """
     by_key: dict[tuple, TakeoffItem] = {}
     order: list[tuple] = []
     for it in items:
-        loc = _norm(it.location)
-        if it.spec and it.spec.strip():
-            key: tuple = ("spec", _norm(it.spec), loc)
-        else:
-            key = ("catname", _norm(it.category), _norm(it.name), loc)
+        key = _item_key(it)
         cur = by_key.get(key)
         if cur is None:
             by_key[key] = it
@@ -196,6 +223,43 @@ def _dedupe_items(items: list[TakeoffItem]) -> list[TakeoffItem]:
             continue
         if it.confidence > cur.confidence:
             by_key[key] = it
+    return [by_key[k] for k in order]
+
+
+def _merge_tile_items(items: list[TakeoffItem]) -> list[TakeoffItem]:
+    """**別々のタイル**から来た項目を 1 ページ分にまとめる（数量は合算する）。
+
+    タイルは重なり部分を薄くして「担当領域にあるものだけ出す」ようにしてあるので、
+    別タイルの同一キーは *同じ部材が二重に来た* のではなく *別の場所にある同じ種類*
+    ＝足すのが正しい。
+    🔴 ここを keep-one にしていたのが、実測で見えていた過小計上の正体だった:
+       弁 3個(タイルA) + 2個(タイルB) → 3個、配管 12m + 16.5m → 12m。
+    確度は合算した中の **最小** を採る。合計は一番弱い根拠と同じだけしか信用できない。
+    """
+    by_key: dict[tuple, TakeoffItem] = {}
+    order: list[tuple] = []
+    n_src: dict[tuple, int] = {}
+    for it in items:
+        key = _item_key(it)
+        cur = by_key.get(key)
+        if cur is None:
+            by_key[key] = it
+            order.append(key)
+            n_src[key] = 1
+            continue
+        cur.quantity += it.quantity
+        cur.confidence = min(cur.confidence, it.confidence)
+        if cur.bbox is None and it.bbox is not None:
+            cur.bbox = it.bbox
+        if _BASIS_DOUBT.get(it.qty_basis or "none", 4) > _BASIS_DOUBT.get(cur.qty_basis or "none", 4):
+            cur.qty_basis = it.qty_basis
+        n_src[key] += 1
+    for key, n in n_src.items():
+        if n > 1:
+            logger.info(
+                "タイル合算: %s → %s %s（%dタイル分）",
+                by_key[key].name, by_key[key].quantity, by_key[key].unit, n,
+            )
     return [by_key[k] for k in order]
 
 
@@ -289,18 +353,32 @@ def _extract_symbol_codes(text: str) -> list[str]:
 
 
 def _tile_user_text(page: DrawingPage, tile: Tile, symbol_codes: list[str]) -> str:
-    """タイル抽出時のユーザーテキスト。タイル位置と記号コードを Claude に明示する。"""
+    """タイル抽出時のユーザーテキスト。担当領域と記号コードを明示する。"""
     codes_hint = ""
     if symbol_codes:
         codes_hint = (
             f"\nテキスト層で検出した記号コード（これらを図面上で探してください）: "
             f"{', '.join(symbol_codes[:40])}"
         )
+    faded = tile.core != [0.0, 0.0, 1.0, 1.0]
+    core_rule = (
+        "### この画像の見方（重要）\n"
+        "画像の外周は**うすく**なっています。うすい帯は隣の区画との重なりで、"
+        "**前後のつながりを見るためだけ**に写しています。\n"
+        "🔴 **はっきり見えている中心部分にあるものだけ**を行にしてください。"
+        "うすい帯にしか無いものは出さないでください"
+        "（隣の区画が担当します。両方が出すと同じものを二重に数えます）。\n"
+        "中心部分から出て隣へ続く配管・ダクトは、**この画像の中に見えている分の長さだけ**を"
+        "数量にしてください（続きは隣の区画が足します）。\n"
+        if faded else
+        "この区画に写っているものだけを行にしてください。"
+        "隣の区画にあるものは出さないでください（二重に数えるため）。\n"
+    )
     return (
-        f"## ページ {page.page}（{tile.grid}×{tile.grid} 分割の row={tile.row}, col={tile.col} タイル）\n"
-        f"このタイル領域から拾い出し項目を JSON 配列で返してください。\n"
-        f"タイル境界で半分しか見えない部材は、可能なら spec から推測して 1 行で出してください "
-        f"（次のタイルでも同じ部材を出した場合は後段で重複除去します）。\n"
+        f"## ページ {page.page} — {tile.n_rows}行×{tile.n_cols}列 に分けたうちの "
+        f"{tile.row + 1}行目 {tile.col + 1}列目 (row={tile.row}, col={tile.col})\n"
+        f"{core_rule}"
+        f"この区画から拾い出し項目を JSON 配列で返してください。\n"
         f"テキスト層 (ページ全体): {(page.text or '(なし)')[:2000]}"
         f"{codes_hint}"
     )
@@ -389,8 +467,8 @@ def extract(
             tile_items: list[TakeoffItem] = []
             for tile in page.tiles:
                 logger.info(
-                    "page %d: extracting tile (r=%d, c=%d) of %dx%d",
-                    page.page, tile.row, tile.col, tile.grid, tile.grid,
+                    "page %d: extracting tile (r=%d, c=%d) of %d行×%d列",
+                    page.page, tile.row, tile.col, tile.n_rows, tile.n_cols,
                 )
                 try:
                     tile_items.extend(
@@ -409,8 +487,8 @@ def extract(
                     if failures is not None:
                         failures.append(str(e))
             before = len(tile_items)
-            page_items = _dedupe_items(tile_items)
-            logger.info("page %d: pass1 deduped %d → %d items", page.page, before, len(page_items))
+            page_items = _merge_tile_items(tile_items)
+            logger.info("page %d: pass1 %d行 → %d行（タイル間は合算）", page.page, before, len(page_items))
         else:
             try:
                 page_items = _call_llm_for_image(
