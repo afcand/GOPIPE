@@ -115,7 +115,7 @@ def create_drawing(
 
 def replace_takeoff_items(
     project_id: str, org_id: str, items: list[TakeoffItem],
-    drawing_id: str | None = None,
+    drawing_id: str | None = None, append: bool = False,
 ) -> int:
     """明細を保存する。
 
@@ -124,10 +124,17 @@ def replace_takeoff_items(
     人の修正）が警告なく消える。
     さらに 0件のときは削除しない。AI側の一時障害で0件が返ったときに、
     前回の結果まで道連れにしないため。
+
+    🔴 append=True は何も消さずに足すだけ。現地実測を **既存の物件へ足す** ときに使う。
+    実測は図面を持たない（drawing_id が無い）ので、置き換えにすると
+    `drawing_id is null` の行が全部消える＝**人が手で足した行が警告なく消える**
+    （/api/items/rows で足した行は drawing_id を持たない）。
     """
     if not items:
         return 0
-    if drawing_id:
+    if append:
+        pass  # 何も消さない
+    elif drawing_id:
         _req("DELETE", "takeoff_items", params=f"?drawing_id=eq.{drawing_id}")
     else:
         # 旧経路（図面を作らない呼び出し）。図面未指定の行だけを入れ替える。
@@ -155,6 +162,7 @@ def persist_takeoff(
     *, org_slug: str, org_name: str, project_slug: str, title: str,
     items: list[TakeoffItem], source_pdf_path: str | None = None,
     file_name: str | None = None, warnings: list[str] | None = None,
+    append: bool = False,
 ) -> dict:
     """org → project → drawing → takeoff_items を保存し、id 群と件数を返す。"""
     org_id = ensure_org(org_slug, org_name)
@@ -167,7 +175,7 @@ def persist_takeoff(
             page_count=max((it.page for it in items), default=None),
             warnings=warnings,
         )
-    n = replace_takeoff_items(project_id, org_id, items, drawing_id)
+    n = replace_takeoff_items(project_id, org_id, items, drawing_id, append=append)
     total = _project_item_count(project_id)
     if total is not None:
         # 一覧に出るのは「その物件の合計」。直近1回の件数を出すと、
