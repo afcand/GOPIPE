@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { needsReview, type TakeoffItem } from "@/lib/gopipe";
 import { ReviewTable, StatCards, sortForReview, type Row } from "@/components/ReviewTable";
@@ -33,6 +33,57 @@ export default function Workbench({
   );
   const edited = useMemo(() => (rows ?? []).filter((r) => r.edited), [rows]);
   const busy = phase !== "";
+  const [dragging, setDragging] = useState(false);
+
+  // ドラッグ＆ドロップで図面を受ける。パネルだけでなく画面のどこへ落としても
+  // 受かるようにする。window 側で既定動作を止めるのは、狙いが数px外れたときに
+  // ブラウザがPDFを開いて作業画面ごと消える事故を防ぐため。
+  const acceptDropped = useCallback(
+    (list: FileList | null | undefined) => {
+      if (busy) return; // 実行中の差し替えは事故のもと（読んでいる図面と表示が食い違う）
+      const dropped = Array.from(list ?? []).find(
+        (f) =>
+          /\.(pdf|jpe?g|png|heic)$/i.test(f.name) ||
+          ["application/pdf", "image/jpeg", "image/png", "image/heic"].includes(f.type),
+      );
+      if (!dropped) {
+        setError("PDFか写真（JPEG・PNG・HEIC）を落としてください");
+        return;
+      }
+      setError("");
+      setNotice((list?.length ?? 0) > 1 ? "図面は1枚ずつ読みます。最初の1枚を選びました" : "");
+      setFile(dropped);
+    },
+    [busy],
+  );
+
+  useEffect(() => {
+    const hasFiles = (e: DragEvent) =>
+      Array.from(e.dataTransfer?.types ?? []).includes("Files");
+    const over = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      setDragging(true);
+    };
+    const leave = (e: DragEvent) => {
+      // 画面の外へ出たときだけ消す（子要素間の移動では relatedTarget が入る）
+      if (!e.relatedTarget) setDragging(false);
+    };
+    const drop = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      setDragging(false);
+      acceptDropped(e.dataTransfer?.files);
+    };
+    window.addEventListener("dragover", over);
+    window.addEventListener("dragleave", leave);
+    window.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("dragleave", leave);
+      window.removeEventListener("drop", drop);
+    };
+  }, [acceptDropped]);
 
   async function run() {
     if (!file) {
@@ -233,13 +284,24 @@ export default function Workbench({
       <section className="py-9">
         <h1 className="mt-0 mb-1 text-[22px] font-black">設備図から拾い出す</h1>
         <p className="mt-0 mb-6 text-[14px] text-[var(--mut)]">
-          設備図（PDF・写真）を選んで実行すると、AIが下書きを作ります。直した内容は会社の辞書に覚えさせられます。
+          設備図（PDF・写真）を選ぶか、この画面のどこかへドラッグして実行すると、AIが下書きを作ります。直した内容は会社の辞書に覚えさせられます。
           手書きの図面も読めますが、印字より精度は落ちます（数字は必ずご確認ください）。
         </p>
 
-        <div className="flex flex-col gap-3 rounded-[13px] border border-[var(--line)] bg-[var(--panel)] p-5 sm:flex-row sm:items-center">
+        <div
+          className={
+            "flex flex-col gap-3 rounded-[13px] border p-5 sm:flex-row sm:items-center " +
+            (dragging
+              ? "border-2 border-dashed border-[var(--cyan)] bg-[rgba(86,204,242,0.10)]"
+              : "border-[var(--line)] bg-[var(--panel)]")
+          }
+        >
           <label className="cursor-pointer rounded-[10px] border border-dashed border-[var(--cyan)] px-5 py-2.5 text-[14px] font-bold whitespace-nowrap text-[var(--cyan)] hover:bg-[rgba(86,204,242,0.08)]">
-            {file ? `📄 ${file.name}` : "設備図を選ぶ（PDF・写真）"}
+            {dragging
+              ? "ここに離すと読み込みます"
+              : file
+                ? `📄 ${file.name}`
+                : "設備図を選ぶ／ここへドラッグ"}
             <input
               ref={fileRef}
               type="file"
