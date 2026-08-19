@@ -37,12 +37,16 @@ export function ReviewTable({
   rows,
   onEdit,
   onRemove,
+  onRevert,
 }: {
   rows: Row[];
   onEdit: (id: number, patch: Partial<Row>) => void;
-  /** 渡すと行を消せるようになる（拾い過ぎ・二重計上の始末） */
+  /** 渡すと行を消せるようになる（拾い過ぎ・二重計上・そもそも要らない行の始末） */
   onRemove?: (id: number) => void;
+  /** 渡すと、直した行をAIが出した最初の値へ戻せるようになる */
+  onRevert?: (id: number) => void;
 }) {
+  const hasTools = Boolean(onRemove || onRevert);
   return (
     <div className="overflow-x-auto rounded-[13px] border border-[var(--line)] bg-[var(--navy2)]">
       <table className="w-full min-w-[980px] border-collapse text-[14px]">
@@ -56,7 +60,7 @@ export function ReviewTable({
             <th className="px-3 py-3 font-bold">単位</th>
             <th className="px-3 py-3 font-bold">カテゴリ</th>
             <th className="px-3 py-3 font-bold">場所</th>
-            {onRemove && <th className="px-2 py-3" />}
+            {hasTools && <th className="px-2 py-3" />}
           </tr>
         </thead>
         <tbody>
@@ -140,15 +144,26 @@ export function ReviewTable({
                     className={`${cell} w-[130px] text-[var(--mut)] focus:text-[var(--ink)]`}
                   />
                 </td>
-                {onRemove && (
+                {hasTools && (
                   <td className="px-2 py-2 whitespace-nowrap">
-                    <button
-                      onClick={() => onRemove(r.id)}
-                      title="この行を消す（二重計上や拾い過ぎのとき）"
-                      className="rounded px-2 py-1 text-[13px] text-[var(--mut)] hover:bg-[rgba(215,38,30,0.12)] hover:text-[var(--red)]"
-                    >
-                      ✕
-                    </button>
+                    {onRevert && r.edited && (
+                      <button
+                        onClick={() => onRevert(r.id)}
+                        title="この行をAIが出した最初の値に戻す"
+                        className="rounded px-2 py-1 text-[13px] text-[var(--mut)] hover:bg-[rgba(86,204,242,0.12)] hover:text-[var(--cyan)]"
+                      >
+                        ↩
+                      </button>
+                    )}
+                    {onRemove && (
+                      <button
+                        onClick={() => onRemove(r.id)}
+                        title="この行を消す（要らない拾い出し・二重計上のとき）"
+                        className="rounded px-2 py-1 text-[13px] text-[var(--mut)] hover:bg-[rgba(215,38,30,0.12)] hover:text-[var(--red)]"
+                      >
+                        ✕
+                      </button>
+                    )}
                   </td>
                 )}
               </tr>
@@ -180,6 +195,47 @@ export function StatCards({
           </p>
         </div>
       ))}
+    </div>
+  );
+}
+
+
+/**
+ * 直前の操作を取り消す口。
+ *
+ * 消す機能だけを付けて取り消しを付けないと、人は怖くて消せない
+ * （消し間違いが取り返せないと、結局「消さずに残す」＝表が汚れたまま使われる）。
+ * 消した行・直した行はここから戻す。
+ */
+export function UndoBar({
+  count,
+  label,
+  onUndo,
+  onDismiss,
+}: {
+  count: number;
+  label: string;
+  onUndo: () => void;
+  onDismiss?: () => void;
+}) {
+  if (count <= 0) return null;
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-3 rounded-[11px] border border-[var(--line)] bg-[var(--panel)] px-4 py-2.5">
+      <span className="text-[13.5px] text-[var(--mut)]">{label}</span>
+      <button
+        onClick={onUndo}
+        className="rounded-[9px] border border-[var(--cyan)] px-3 py-1 text-[13px] font-bold text-[var(--cyan)] hover:bg-[rgba(86,204,242,0.10)]"
+      >
+        ↩ 元に戻す（{count}）
+      </button>
+      {onDismiss && (
+        <button
+          onClick={onDismiss}
+          className="text-[12.5px] text-[var(--mut)] underline hover:text-[var(--ink)]"
+        >
+          このまま進む
+        </button>
+      )}
     </div>
   );
 }

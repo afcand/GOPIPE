@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { needsReview, type TakeoffItem } from "@/lib/gopipe";
-import { ReviewTable, StatCards, sortForReview, type Row } from "@/components/ReviewTable";
+import { ReviewTable, StatCards, UndoBar, sortForReview, type Row } from "@/components/ReviewTable";
 import { supabaseBrowser } from "@/lib/supabase/client";
 
 type Phase = "" | "upload" | "run" | "learn" | "excel";
@@ -152,6 +152,39 @@ export default function Workbench({
 
   function edit(id: number, patch: Partial<Row>) {
     setRows((cur) => (cur ?? []).map((r) => (r.id === id ? { ...r, ...patch, edited: true } : r)));
+  }
+
+  /** 消した行の控え。消す機能だけ付けて取り消しが無いと、怖くて誰も消さない。 */
+  const [trash, setTrash] = useState<{ row: Row; at: number }[]>([]);
+
+  /** 要らない拾い出しを消す（拾い過ぎ・二重計上・そもそも対象外）。 */
+  function removeRow(id: number) {
+    setRows((cur) => {
+      const target = (cur ?? []).find((r) => r.id === id);
+      if (target) setTrash((t) => [...t, { row: target, at: (cur ?? []).indexOf(target) }]);
+      return (cur ?? []).filter((r) => r.id !== id);
+    });
+  }
+
+  /** 消した行を元の位置へ戻す（末尾に足すと、どこにあった行か分からなくなる）。 */
+  function undoRemove() {
+    setTrash((t) => {
+      const last = t[t.length - 1];
+      if (!last) return t;
+      setRows((cur) => {
+        const next = [...(cur ?? [])];
+        next.splice(Math.min(last.at, next.length), 0, last.row);
+        return next;
+      });
+      return t.slice(0, -1);
+    });
+  }
+
+  /** 直した行をAIが出した最初の値へ戻す。base は行が抱えている。 */
+  function revertRow(id: number) {
+    setRows((cur) =>
+      (cur ?? []).map((r) => (r.id === id ? { ...r, ...r.base, id: r.id, base: r.base, edited: false } : r)),
+    );
   }
 
   /** 直した行を「直す前 → 直した後」の組にする。直す前は行が抱えている base。 */
@@ -376,7 +409,13 @@ export default function Workbench({
               🔴の行を上にまとめてあります。名称・数量・単位・カテゴリはその場で直せます。
             </p>
 
-            <ReviewTable rows={rows} onEdit={edit} />
+            <UndoBar
+              count={trash.length}
+              label={`消した行が ${trash.length} 件あります`}
+              onUndo={undoRemove}
+              onDismiss={() => setTrash([])}
+            />
+            <ReviewTable rows={rows} onEdit={edit} onRemove={removeRow} onRevert={revertRow} />
 
             <div className="mt-6 flex flex-wrap items-center gap-3">
               {projectId && (

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { needsReview, type TakeoffItem } from "@/lib/gopipe";
-import { ReviewTable, StatCards, type Row } from "@/components/ReviewTable";
+import { ReviewTable, StatCards, UndoBar, type Row } from "@/components/ReviewTable";
 
 type DbItem = TakeoffItem & { id: string; status?: string };
 
@@ -147,7 +147,10 @@ export default function ProjectReview({
     setRows((cur) => [blank, ...cur]);
   }
 
-  /** 拾い過ぎ・二重計上の行を消す。消したことも記録に残る。 */
+  /** 消した行の控え。台帳から消えるので、取り消せないと怖くて消せない。 */
+  const [trash, setTrash] = useState<{ row: Row; at: number }[]>([]);
+
+  /** 要らない拾い出しを消す（拾い過ぎ・二重計上・そもそも対象外）。消したことも記録に残る。 */
   async function removeRow(id: number) {
     const row = rows.find((r) => r.id === id);
     if (!row?.dbId) return;
@@ -168,7 +171,54 @@ export default function ProjectReview({
       setError("消せませんでした。通信を確認してください。");
       return;
     }
+    setTrash((t) => [...t, { row, at: rows.indexOf(row) }]);
     setRows((cur) => cur.filter((r) => r.id !== id));
+  }
+
+  /**
+   * 消した行を台帳へ戻す。
+   * 台帳の行は物理削除されているので、同じ内容で入れ直す（dbId は新しくなる）。
+   * 末尾でなく元の位置へ戻す＝どこにあった行か分からなくならないように。
+   */
+  async function undoRemove() {
+    const last = trash[trash.length - 1];
+    if (!last) return;
+    setError("");
+    const r = last.row;
+    const res = await fetch("/api/items/rows", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId,
+        item: {
+          name: r.name, spec: r.spec, quantity: r.quantity, unit: r.unit,
+          location: r.location, category: r.category, page: r.page ?? 1,
+        },
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setError(data?.error ?? "戻せませんでした。通信を確認してください。");
+      return;
+    }
+    setTrash((t) => t.slice(0, -1));
+    setRows((cur) => {
+      const next = [...cur];
+      next.splice(Math.min(last.at, next.length), 0, { ...r, dbId: data.id, saveState: "saved" });
+      return next;
+    });
+  }
+
+  /** 直した行をAIが出した最初の値へ戻す（台帳にも書き戻す）。 */
+  function revertRow(id: number) {
+    const row = rows.find((r) => r.id === id);
+    if (!row) return;
+    const restored: Row = { ...row, ...row.base, id: row.id, dbId: row.dbId, base: row.base, edited: false };
+    setRows((cur) => cur.map((r) => (r.id === id ? restored : r)));
+    const t = pending.current.get(id);
+    if (t) clearTimeout(t);
+    pending.current.delete(id);
+    void save(restored);
   }
 
   // 画面を閉じる直前に、打ちかけの保存を取りこぼさない
@@ -208,7 +258,15 @@ export default function ProjectReview({
       {rows.length === 0 ? (
         <p className="text-[15px] text-[var(--mut)]">この物件にはまだ明細がありません。</p>
       ) : (
-        <ReviewTable rows={rows} onEdit={edit} onRemove={removeRow} />
+        <>
+          <UndoBar
+            count={trash.length}
+            label={`消した行が ${trash.length} 件あります`}
+            onUndo={undoRemove}
+            onDismiss={() => setTrash([])}
+          />
+          <ReviewTable rows={rows} onEdit={edit} onRemove={removeRow} onRevert={revertRow} />
+        </>
       )}
     </section>
   );

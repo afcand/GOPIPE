@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { needsReview, type TakeoffItem } from "@/lib/gopipe";
-import { ReviewTable, StatCards, sortForReview, type Row } from "@/components/ReviewTable";
+import { ReviewTable, StatCards, UndoBar, sortForReview, type Row } from "@/components/ReviewTable";
 
 export default function Home() {
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -32,6 +32,36 @@ export default function Home() {
 
   function edit(id: number, patch: Partial<Row>) {
     setRows((cur) => (cur ?? []).map((r) => (r.id === id ? { ...r, ...patch, edited: true } : r)));
+  }
+
+  /** 消した行の控え。取り消せないと、怖くて誰も消さない。 */
+  const [trash, setTrash] = useState<{ row: Row; at: number }[]>([]);
+
+  function removeRow(id: number) {
+    setRows((cur) => {
+      const target = (cur ?? []).find((r) => r.id === id);
+      if (target) setTrash((t) => [...t, { row: target, at: (cur ?? []).indexOf(target) }]);
+      return (cur ?? []).filter((r) => r.id !== id);
+    });
+  }
+
+  function undoRemove() {
+    setTrash((t) => {
+      const last = t[t.length - 1];
+      if (!last) return t;
+      setRows((cur) => {
+        const next = [...(cur ?? [])];
+        next.splice(Math.min(last.at, next.length), 0, last.row);
+        return next;
+      });
+      return t.slice(0, -1);
+    });
+  }
+
+  function revertRow(id: number) {
+    setRows((cur) =>
+      (cur ?? []).map((r) => (r.id === id ? { ...r, ...r.base, id: r.id, base: r.base, edited: false } : r)),
+    );
   }
 
   async function downloadExcel() {
@@ -138,7 +168,13 @@ export default function Home() {
               直した行は確定扱いになります。
             </p>
 
-            <ReviewTable rows={rows} onEdit={edit} />
+            <UndoBar
+              count={trash.length}
+              label={`消した行が ${trash.length} 件あります`}
+              onUndo={undoRemove}
+              onDismiss={() => setTrash([])}
+            />
+            <ReviewTable rows={rows} onEdit={edit} onRemove={removeRow} onRevert={revertRow} />
 
             <div className="mt-6 flex flex-wrap items-center gap-4">
               <button
