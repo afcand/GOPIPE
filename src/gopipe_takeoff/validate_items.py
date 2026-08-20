@@ -52,6 +52,51 @@ def _fmt(v: float) -> str:
     return str(int(v)) if float(v).is_integer() else str(v)
 
 
+# 立ち上がり・立下りとみなす最小の高低差(mm)。これ未満は施工誤差や表記ゆれの範囲。
+_RISER_MIN_MM = 300.0
+
+
+def find_missing_risers(items: list[TakeoffItem]) -> list[dict]:
+    """高さの違う区間をつなぐ「立ち上がり・立下り」が未計上でないかを見る。
+
+    🔴 平面図では垂直の区間が点にしか見えず、延長が丸ごと落ちる。
+    実測(2026-08-20 資料②): 高さが 2,850mm にわたって12段あり、
+    **16要素すべてが 0m** だった＝垂直の配管・ダクトが1本も数えられていない。
+
+    ここでは数量を勝手に作らない。「この系統は FL+2700 と FL+5300 に跨っており、
+    その間の垂直区間が表に無い」という**事実だけ**を出す。
+    長さを埋めるのは人（または将来の3D経路追跡）の仕事。
+    """
+    groups: dict[tuple, list[TakeoffItem]] = {}
+    for it in items:
+        if it.level_mm is None:
+            continue
+        if (it.unit or "").strip() not in {"m", "m2"}:
+            continue
+        key = ((it.name or "").strip(), (it.category or "").strip())
+        groups.setdefault(key, []).append(it)
+
+    found: list[dict] = []
+    for (name, cat), rows in groups.items():
+        levels = sorted({float(r.level_mm) for r in rows})
+        if len(levels) < 2:
+            continue
+        drop = levels[-1] - levels[0]
+        if drop < _RISER_MIN_MM:
+            continue
+        # 縦の区間が既に行として在るなら二重に言わない
+        if any(k in (r.name or "") for r in rows for k in ("立上", "立ち上", "立下", "立ち下")):
+            continue
+        found.append({
+            "name": name, "category": cat,
+            "levels": [int(v) for v in levels],
+            "drop_mm": int(drop),
+            "rows": len(rows),
+        })
+    found.sort(key=lambda x: -x["drop_mm"])
+    return found
+
+
 def check(items: list[TakeoffItem]) -> dict[int, list[str]]:
     """各 index → issue リスト（issue のある行のみ）。重複の疑いも検出。"""
     out: dict[int, list[str]] = {}
@@ -105,6 +150,17 @@ def check(items: list[TakeoffItem]) -> dict[int, list[str]]:
                     break
         if issues:
             out[i] = issues
+
+    # 立ち上がり・立下りが未計上の系統は、その系統の行に印を付ける。
+    # 「高さの違う行が並んでいる」だけでは人は気づけない。
+    risers = {(r["name"], r["category"]): r for r in find_missing_risers(items)}
+    for i, it in enumerate(items):
+        r = risers.get(((it.name or "").strip(), (it.category or "").strip()))
+        if r:
+            out.setdefault(i, []).append(
+                f"立上り/立下りが未計上の可能性（FL+{r['levels'][0]}〜FL+{r['levels'][-1]}"
+                f"＝高低差{r['drop_mm']}mm）"
+            )
     return out
 
 

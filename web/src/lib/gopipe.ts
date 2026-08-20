@@ -37,6 +37,8 @@ export type TakeoffItem = {
   /** 図面上でその部材が描かれていた色（機械で実測・参考値） */
   color?: string | null;
   color_hue?: number | null;
+  /** 取付高さ FL+◯◯mm（Z軸）。立下りの見落としに効く */
+  level_mm?: number | null;
 };
 
 /** 🔴＝要確認。Streamlit 版と同じ 0.7 / 0.85 の線を守る。 */

@@ -118,6 +118,7 @@ export default function Home() {
             source: r.source ?? null,
             color: r.color ?? null,
             color_hue: r.color_hue ?? null,
+            level_mm: r.level_mm ?? null,
             page: r.page ?? 1,
           })),
         }),

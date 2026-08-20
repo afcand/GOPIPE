@@ -218,6 +218,9 @@ def _parse_response(raw: str, *, page_number: int, drop_bbox: bool = False) -> l
             if qty == 0 and basis is None:
                 basis = "none"
             conf = float(row.get("confidence", 1.0) or 1.0)
+            level = parse_level_mm(
+                row.get("level_mm"), row.get("location"), row.get("name"), row.get("spec")
+            )
             # 推定値に高い確度を持たせない。実測(2026-08-19)では推定の数量は
             # 同じ図面を2回かけると動いた（25.0m→20.0m）。0.9 と並べて出すと
             # 人が検算すべき行が「🟢そのままでOK」に化ける。
@@ -234,6 +237,7 @@ def _parse_response(raw: str, *, page_number: int, drop_bbox: bool = False) -> l
                     bbox=BBox.from_list(bbox_val) if bbox_val else None,
                     confidence=conf,
                     qty_basis=basis,
+                    level_mm=level,
                 )
             )
         except Exception:
@@ -284,6 +288,44 @@ def _call_llm_for_image(
     )
 
 
+_FL_RE = re.compile(r"FL\s*[+＋]\s*([0-9][0-9,.\s]*)")
+
+
+def parse_level_mm(raw, *fallback_texts: str | None) -> float | None:
+    """取付高さを mm の数値にする。
+
+    図面の書き方は揺れる（`FL+3,065` `FL+2.830` `FL＋2700`）。
+    ピリオドは小数点でなく桁区切りのことがある（実測: 資料④に `FL+2.830` があり、
+    これは 2.83mm ではなく 2,830mm）。**4桁前後の整数**に落として扱う。
+    AIが level_mm を返さなくても、名称や場所に紛れた FL 表記から拾う。
+    """
+    val = None
+    if raw is not None and raw != "":
+        try:
+            val = float(str(raw).replace(",", "").replace(" ", ""))
+        except (TypeError, ValueError):
+            val = None
+    if val is None:
+        for t in fallback_texts:
+            if not t:
+                continue
+            m = _FL_RE.search(str(t))
+            if m:
+                try:
+                    val = float(m.group(1).replace(",", "").replace(".", "").strip())
+                except ValueError:
+                    val = None
+                break
+    if val is None:
+        return None
+    # 小数で来たら m 表記とみなして mm へ（FL+2.83 → 2830）
+    if 0 < val < 30:
+        val *= 1000
+    # 建物の階高として現実的な範囲だけ通す。桁を読み違えた値を入れると
+    # 立下りの長さが桁で狂う。
+    return round(val, 1) if 100 <= val <= 60000 else None
+
+
 def _norm(s: str | None) -> str:
     if not s:
         return ""
@@ -306,9 +348,11 @@ def _item_key(it: TakeoffItem) -> tuple:
     loc = _norm(it.location)
     unit = _norm(it.unit)
     col = _norm(it.color)  # 色が測れなかった行は "" ＝ 互いに集約される
+    # 取付高さが違えば別の区間。まとめると、その間の立ち上がり・立下りが見えなくなる。
+    lv = "" if it.level_mm is None else str(int(it.level_mm))
     if it.spec and it.spec.strip():
-        return ("spec", _norm(it.spec), unit, loc, col)
-    return ("catname", _norm(it.category), _norm(it.name), unit, loc, col)
+        return ("spec", _norm(it.spec), unit, loc, col, lv)
+    return ("catname", _norm(it.category), _norm(it.name), unit, loc, col, lv)
 
 
 def _shape_key(it: TakeoffItem) -> tuple:

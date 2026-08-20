@@ -90,6 +90,9 @@ def _items_json(items) -> list[dict]:
             "color": it.color,
             "color_hue": it.color_hue,
             "color_meaning": it.color_meaning,
+            # 取付高さ(Z軸)。高さの違う区間をつなぐ立下りは平面図では点に見え、
+            # 延長が丸ごと落ちる。画面と Excel に出すために運ぶ。
+            "level_mm": it.level_mm,
             "source": it.source,
             "checks": flags.get(i, []),
             # 学習の鍵。表示名を鍵にすると、直すたびに別部材まで巻き添えで化ける。
@@ -645,6 +648,7 @@ async def export_xlsx(payload: dict = Body(...)):
             qty_cv=(float(r["qty_cv"]) if r.get("qty_cv") is not None else None),
             color=(r.get("color") or None),
             color_hue=(float(r["color_hue"]) if r.get("color_hue") is not None else None),
+            level_mm=(float(r["level_mm"]) if r.get("level_mm") is not None else None),
             source=(r.get("source") or None),
         )
         for r in rows
