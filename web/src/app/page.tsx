@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { needsReview, type TakeoffItem } from "@/lib/gopipe";
-import { ReviewTable, StatCards, UndoBar, sortForReview, type Row } from "@/components/ReviewTable";
+import { ReviewTable, StatCards, BulkBar, ExportSummary, UndoBar, sortForReview, type Row } from "@/components/ReviewTable";
 
 export default function Home() {
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -47,15 +47,44 @@ export default function Home() {
 
   function undoRemove() {
     setTrash((t) => {
-      const last = t[t.length - 1];
-      if (!last) return t;
+      if (t.length === 0) return t;
       setRows((cur) => {
         const next = [...(cur ?? [])];
-        next.splice(Math.min(last.at, next.length), 0, last.row);
+        // 位置の小さい順に戻すと後続の添字がずれる。大きい順に差し込む。
+        [...t].sort((a, b) => b.at - a.at).forEach((x) => {
+          next.splice(Math.min(x.at, next.length), 0, x.row);
+        });
         return next;
       });
-      return t.slice(0, -1);
+      return [];
     });
+  }
+
+  /** まとめて消すための選択。要らない行は数十件まとめて出るので1件ずつでは続かない。 */
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  function toggleOne(id: number) {
+    setPicked((cur) => {
+      const n = new Set(cur);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  }
+  function toggleAll() {
+    setPicked((cur) =>
+      cur.size === (rows ?? []).length ? new Set() : new Set((rows ?? []).map((r) => r.id)),
+    );
+  }
+  /** 選んだ行をまとめて消す（1回の取り消しで全部戻せるよう、まとめて控える）。 */
+  function removePicked() {
+    if (picked.size === 0) return;
+    setRows((cur) => {
+      const list = cur ?? [];
+      const gone = list.map((r, at) => ({ row: r, at })).filter((x) => picked.has(x.row.id));
+      if (gone.length) setTrash((t) => [...t, ...gone]);
+      return list.filter((r) => !picked.has(r.id));
+    });
+    setPicked(new Set());
   }
 
   function revertRow(id: number) {
@@ -82,6 +111,12 @@ export default function Home() {
             category: r.category,
             // 人が直した行は確定扱い（Streamlit 版と同じ考え方）
             confidence: r.edited ? 1 : r.confidence,
+            // 🔴これを送らないと、Excelの備考（出所）が丸ごと空になる。
+            // 確かな数と推定が同じ顔で並ぶのを止めるための列なので落とせない。
+            qty_basis: r.qty_basis ?? null,
+            qty_cv: r.qty_cv ?? null,
+            source: r.source ?? null,
+            page: r.page ?? 1,
           })),
         }),
       });
@@ -174,7 +209,17 @@ export default function Home() {
               onUndo={undoRemove}
               onDismiss={() => setTrash([])}
             />
-            <ReviewTable rows={rows} onEdit={edit} onRemove={removeRow} onRevert={revertRow} />
+            <ExportSummary rows={rows} removed={trash.length} />
+            <BulkBar count={picked.size} onRemove={removePicked} onClear={() => setPicked(new Set())} />
+            <ReviewTable
+              rows={rows}
+              onEdit={edit}
+              onRemove={removeRow}
+              onRevert={revertRow}
+              selected={picked}
+              onToggleSelect={toggleOne}
+              onToggleAll={toggleAll}
+            />
 
             <div className="mt-6 flex flex-wrap items-center gap-4">
               <button

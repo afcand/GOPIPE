@@ -28,6 +28,12 @@ export type TakeoffItem = {
   qty_vision?: number | null;
   /** 何ページ目か。🔴の行を図面で確認するときに要る */
   page?: number;
+  /** 数量の出所（table/count/measure/estimate/none）。備考の書き分けに要る */
+  qty_basis?: string | null;
+  /** 記号テンプレート照合が数えた個数 */
+  qty_cv?: number | null;
+  /** 抽出の由来（reconciled / cv_count / suppressed_hit など） */
+  source?: string | null;
 };
 
 /** 🔴＝要確認。Streamlit 版と同じ 0.7 / 0.85 の線を守る。 */

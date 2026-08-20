@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { needsReview, type TakeoffItem } from "@/lib/gopipe";
-import { ReviewTable, StatCards, UndoBar, type Row } from "@/components/ReviewTable";
+import { BulkBar, ReviewTable, StatCards, UndoBar, type Row } from "@/components/ReviewTable";
 
 type DbItem = TakeoffItem & { id: string; status?: string };
 
@@ -209,6 +209,31 @@ export default function ProjectReview({
     });
   }
 
+  /** まとめて消すための選択。台帳への削除は1件ずつ順に投げる（順序を保つため）。 */
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  function toggleOne(id: number) {
+    setPicked((cur) => {
+      const n = new Set(cur);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  }
+  function toggleAll() {
+    setPicked((cur) => (cur.size === rows.length ? new Set() : new Set(rows.map((r) => r.id))));
+  }
+  async function removePicked() {
+    if (picked.size === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    // 台帳から消えるので、まとめて投げず1件ずつ確かめながら進む。
+    for (const id of Array.from(picked)) {
+      await removeRow(id);
+    }
+    setPicked(new Set());
+    setBulkBusy(false);
+  }
+
   /** 直した行をAIが出した最初の値へ戻す（台帳にも書き戻す）。 */
   function revertRow(id: number) {
     const row = rows.find((r) => r.id === id);
@@ -265,7 +290,20 @@ export default function ProjectReview({
             onUndo={undoRemove}
             onDismiss={() => setTrash([])}
           />
-          <ReviewTable rows={rows} onEdit={edit} onRemove={removeRow} onRevert={revertRow} />
+          <BulkBar
+            count={picked.size}
+            onRemove={removePicked}
+            onClear={() => setPicked(new Set())}
+          />
+          <ReviewTable
+            rows={rows}
+            onEdit={edit}
+            onRemove={removeRow}
+            onRevert={revertRow}
+            selected={picked}
+            onToggleSelect={toggleOne}
+            onToggleAll={toggleAll}
+          />
         </>
       )}
     </section>

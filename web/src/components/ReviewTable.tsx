@@ -38,6 +38,9 @@ export function ReviewTable({
   onEdit,
   onRemove,
   onRevert,
+  selected,
+  onToggleSelect,
+  onToggleAll,
 }: {
   rows: Row[];
   onEdit: (id: number, patch: Partial<Row>) => void;
@@ -45,13 +48,30 @@ export function ReviewTable({
   onRemove?: (id: number) => void;
   /** 渡すと、直した行をAIが出した最初の値へ戻せるようになる */
   onRevert?: (id: number) => void;
+  /** 渡すと選択欄が出る。要らない行は数十件まとめて出るので、1件ずつ✕は現場が続かない */
+  selected?: Set<number>;
+  onToggleSelect?: (id: number) => void;
+  onToggleAll?: () => void;
 }) {
   const hasTools = Boolean(onRemove || onRevert);
+  const pickable = Boolean(selected && onToggleSelect);
+  const allPicked = pickable && rows.length > 0 && rows.every((r) => selected!.has(r.id));
   return (
     <div className="overflow-x-auto rounded-[13px] border border-[var(--line)] bg-[var(--navy2)]">
       <table className="w-full min-w-[980px] border-collapse text-[14px]">
         <thead>
           <tr className="border-b border-[var(--line)] text-left text-[12px] tracking-wider text-[var(--mut)]">
+            {pickable && (
+              <th className="px-3 py-3">
+                <input
+                  type="checkbox"
+                  checked={allPicked}
+                  onChange={() => onToggleAll?.()}
+                  title={allPicked ? "選択を全部外す" : "表示中を全部選ぶ"}
+                  className="h-4 w-4 accent-[var(--cyan)]"
+                />
+              </th>
+            )}
             <th className="px-3 py-3 font-bold">確度</th>
             <th className="px-3 py-3 font-bold">チェック</th>
             <th className="px-3 py-3 font-bold">名称</th>
@@ -70,8 +90,21 @@ export function ReviewTable({
             return (
               <tr
                 key={r.id}
-                className="border-b border-[var(--line)] last:border-0 hover:bg-[rgba(86,204,242,0.04)]"
+                className={
+                  "border-b border-[var(--line)] last:border-0 hover:bg-[rgba(86,204,242,0.04)] " +
+                  (pickable && selected!.has(r.id) ? "bg-[rgba(215,38,30,0.10)]" : "")
+                }
               >
+                {pickable && (
+                  <td className="px-3 py-2">
+                    <input
+                      type="checkbox"
+                      checked={selected!.has(r.id)}
+                      onChange={() => onToggleSelect!(r.id)}
+                      className="h-4 w-4 accent-[var(--cyan)]"
+                    />
+                  </td>
+                )}
                 <td className="px-3 py-2 whitespace-nowrap">
                   <span
                     title={
@@ -236,6 +269,69 @@ export function UndoBar({
           このまま進む
         </button>
       )}
+    </div>
+  );
+}
+
+
+/** 選択した行をまとめて消す帯。要らない行は数十件まとめて出るので、1件ずつでは続かない。 */
+export function BulkBar({
+  count,
+  onRemove,
+  onClear,
+}: {
+  count: number;
+  onRemove: () => void;
+  onClear: () => void;
+}) {
+  if (count <= 0) return null;
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-3 rounded-[11px] border border-[rgba(215,38,30,0.4)] bg-[rgba(215,38,30,0.08)] px-4 py-2.5">
+      <span className="text-[13.5px] font-bold">{count} 件を選んでいます</span>
+      <button
+        onClick={onRemove}
+        className="rounded-[9px] border border-[var(--red)] px-3 py-1 text-[13px] font-bold text-[var(--red)] hover:bg-[rgba(215,38,30,0.14)]"
+      >
+        ✕ 選んだ {count} 件を消す
+      </button>
+      <button onClick={onClear} className="text-[12.5px] text-[var(--mut)] underline hover:text-[var(--ink)]">
+        選択を外す
+      </button>
+    </div>
+  );
+}
+
+/** Excel に出す内容を、書き出す前に一言で見せる（消した結果が効いているかを確かめる口）。 */
+export function ExportSummary({ rows, removed }: { rows: Row[]; removed: number }) {
+  const byNote = rows.reduce<Record<string, number>>((acc, r) => {
+    const k =
+      r.qty_basis === "table"
+        ? "図面の表から"
+        : r.qty_basis === "count"
+          ? "図面上で計数"
+          : r.qty_basis === "measure"
+            ? "図面の寸法から"
+            : r.qty_basis === "estimate"
+              ? "🔴AI推定"
+              : r.quantity
+                ? "その他"
+                : "数量なし（人が記入）";
+    acc[k] = (acc[k] ?? 0) + 1;
+    return acc;
+  }, {});
+  return (
+    <div className="mb-3 rounded-[11px] border border-[var(--line)] bg-[var(--panel)] px-4 py-3">
+      <p className="m-0 text-[13.5px]">
+        Excel に出るのは <strong>{rows.length} 件</strong>
+        {removed > 0 && (
+          <span className="text-[var(--mut)]">（消した {removed} 件は入りません）</span>
+        )}
+      </p>
+      <p className="m-0 mt-1 text-[12.5px] text-[var(--mut)]">
+        {Object.entries(byNote)
+          .map(([k, v]) => `${k} ${v}件`)
+          .join(" / ")}
+      </p>
     </div>
   );
 }

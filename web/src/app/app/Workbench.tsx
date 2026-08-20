@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { needsReview, type TakeoffItem } from "@/lib/gopipe";
-import { ReviewTable, StatCards, UndoBar, sortForReview, type Row } from "@/components/ReviewTable";
+import { ReviewTable, StatCards, BulkBar, ExportSummary, UndoBar, sortForReview, type Row } from "@/components/ReviewTable";
 import { supabaseBrowser } from "@/lib/supabase/client";
 
 type Phase = "" | "upload" | "run" | "learn" | "excel";
@@ -166,18 +166,49 @@ export default function Workbench({
     });
   }
 
-  /** 消した行を元の位置へ戻す（末尾に足すと、どこにあった行か分からなくなる）。 */
+  /** 消した行を全部、元の位置へ戻す（末尾に足すとどこにあった行か分からなくなる）。 */
   function undoRemove() {
     setTrash((t) => {
-      const last = t[t.length - 1];
-      if (!last) return t;
+      if (t.length === 0) return t;
       setRows((cur) => {
         const next = [...(cur ?? [])];
-        next.splice(Math.min(last.at, next.length), 0, last.row);
+        // 位置の小さい順に戻すと後続の添字がずれる。大きい順に差し込む。
+        [...t].sort((a, b) => b.at - a.at).forEach((x) => {
+          next.splice(Math.min(x.at, next.length), 0, x.row);
+        });
         return next;
       });
-      return t.slice(0, -1);
+      return [];
     });
+  }
+
+  /** まとめて消すための選択。要らない行は数十件まとめて出るので1件ずつでは続かない。 */
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  function toggleOne(id: number) {
+    setPicked((cur) => {
+      const n = new Set(cur);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  }
+  function toggleAll() {
+    setPicked((cur) =>
+      cur.size === (rows ?? []).length ? new Set() : new Set((rows ?? []).map((r) => r.id)),
+    );
+  }
+  /** 選んだ行をまとめて消す（1回の取り消しで全部戻せるよう、まとめて控える）。 */
+  function removePicked() {
+    if (picked.size === 0) return;
+    setRows((cur) => {
+      const list = cur ?? [];
+      const gone = list
+        .map((r, at) => ({ row: r, at }))
+        .filter((x) => picked.has(x.row.id));
+      if (gone.length) setTrash((t) => [...t, ...gone]);
+      return list.filter((r) => !picked.has(r.id));
+    });
+    setPicked(new Set());
   }
 
   /** 直した行をAIが出した最初の値へ戻す。base は行が抱えている。 */
@@ -252,6 +283,12 @@ export default function Workbench({
             location: r.location,
             category: r.category,
             confidence: r.edited ? 1 : r.confidence,
+            // 🔴これを送らないと、Excelの備考（出所）が丸ごと空になる。
+            // 確かな数と推定が同じ顔で並ぶのを止めるための列なので落とせない。
+            qty_basis: r.qty_basis ?? null,
+            qty_cv: r.qty_cv ?? null,
+            source: r.source ?? null,
+            page: r.page ?? 1,
           })),
         }),
       });
@@ -294,6 +331,14 @@ export default function Workbench({
         </div>
         <div className="text-right text-[12.5px] text-[var(--mut)]">
           <p className="m-0">
+            <a href="/app/measure" className="font-bold text-[var(--cyan)] hover:underline">
+              現地実測
+            </a>
+            <span className="mx-2 opacity-40">|</span>
+            <a href="/app/maintenance" className="font-bold text-[var(--cyan)] hover:underline">
+              更新提案
+            </a>
+            <span className="mx-2 opacity-40">|</span>
             <a href="/app/projects" className="font-bold text-[var(--cyan)] hover:underline">
               物件一覧
             </a>
@@ -377,6 +422,28 @@ export default function Workbench({
           </a>
         </div>
 
+        {/* 図面から始まらない仕事の入口。現場にPDFが無い日と、過去の物件を売る日。 */}
+        <div className="mt-6 grid gap-3 sm:grid-cols-2">
+          <a
+            href="/app/measure"
+            className="rounded-[12px] border border-[var(--line)] bg-[var(--panel)] px-5 py-4 transition hover:border-[var(--cyan)]"
+          >
+            <p className="m-0 text-[15px] font-black">📏 現地実測から拾い出す</p>
+            <p className="m-0 mt-1 text-[13px] text-[var(--mut)]">
+              図面が無い現場で、測った寸法をそのまま入れる
+            </p>
+          </a>
+          <a
+            href="/app/maintenance"
+            className="rounded-[12px] border border-[var(--line)] bg-[var(--panel)] px-5 py-4 transition hover:border-[var(--cyan)]"
+          >
+            <p className="m-0 text-[15px] font-black">🔧 更新提案をつくる</p>
+            <p className="m-0 mt-1 text-[13px] text-[var(--mut)]">
+              前に拾った物件から、そろそろ点検どきの配管を出す
+            </p>
+          </a>
+        </div>
+
         {phase === "run" && (
           <p className="mt-4 text-[14px] text-[var(--cyan)]">
             AIが図面を読んでいます。画面を閉じずにお待ちください（1〜3分ほど）。
@@ -415,7 +482,17 @@ export default function Workbench({
               onUndo={undoRemove}
               onDismiss={() => setTrash([])}
             />
-            <ReviewTable rows={rows} onEdit={edit} onRemove={removeRow} onRevert={revertRow} />
+            <ExportSummary rows={rows} removed={trash.length} />
+            <BulkBar count={picked.size} onRemove={removePicked} onClear={() => setPicked(new Set())} />
+            <ReviewTable
+              rows={rows}
+              onEdit={edit}
+              onRemove={removeRow}
+              onRevert={revertRow}
+              selected={picked}
+              onToggleSelect={toggleOne}
+              onToggleAll={toggleAll}
+            />
 
             <div className="mt-6 flex flex-wrap items-center gap-3">
               {projectId && (
