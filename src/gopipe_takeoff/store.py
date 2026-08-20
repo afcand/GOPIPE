@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import unicodedata
 import urllib.parse
 import urllib.request
 
@@ -247,6 +248,57 @@ def load_learned_aliases(org_slug: str, locale: str = "ja") -> dict:
             "unit": r.get("unit"), "raw": r.get("raw"), "hits": r.get("hits") or 1,
         }
     return out
+
+
+def load_suppressions(org_slug: str, *, min_hits: int = 2, limit: int = 200) -> list[dict]:
+    """人が「要らない」と消した行を集計して返す＝拾わないことの学習。
+
+    なぜ削除を学ぶのか:
+      名称の直しは「Xと読んだがYだ」という言い換えで、打つ手間がかかる。
+      削除はワンクリックで、しかも **その行が要るか要らないか** という
+      積算で最も効く判断そのもの。入力を増やさずに一番強い信号が取れる。
+
+    🔴 1回の削除では効かせない（min_hits=2）。誤って消したときや、
+    その物件限りの事情で消したときに、次から拾わなくなると
+    「無かったことになる」＝拾い出しで最悪の失敗を起こす。
+    **別々の物件で2回以上**消されたものだけを候補にする。
+
+    返すのは候補であって、消す指示ではない。抽出側はこれをプロンプトで
+    「拾わない」と教えるだけで、出てきた行を黙って捨てはしない。
+    """
+    org_id = ensure_org(org_slug, org_slug)
+    rows = _req(
+        "GET", "takeoff_corrections",
+        params=(
+            f"?org_id=eq.{org_id}&kind=eq.removed&select=before,project_id"
+            "&order=created_at.desc&limit=3000"
+        ),
+    )
+    agg: dict[str, dict] = {}
+    for r in (rows or []):
+        before = r.get("before") or {}
+        name = (before.get("raw_name") or before.get("name") or "").strip()
+        if not name:
+            continue
+        key = unicodedata.normalize("NFKC", name).replace(" ", "").replace("　", "")
+        cur = agg.setdefault(key, {"name": name, "hits": 0, "projects": set(), "specs": set()})
+        cur["hits"] += 1
+        if r.get("project_id"):
+            cur["projects"].add(r["project_id"])
+        if before.get("spec"):
+            cur["specs"].add(str(before["spec"])[:24])
+    out = [
+        {
+            "name": v["name"], "hits": v["hits"],
+            "projects": len(v["projects"]), "specs": sorted(v["specs"])[:3],
+        }
+        for v in agg.values()
+        # 同じ物件で連打しただけのものを学ばない。物件をまたいで消されて初めて
+        # 「この会社では要らない」と言える。
+        if v["hits"] >= min_hits and len(v["projects"]) >= min_hits
+    ]
+    out.sort(key=lambda x: (-x["hits"], x["name"]))
+    return out[:limit]
 
 
 def download_drawing(storage_path: str) -> bytes:

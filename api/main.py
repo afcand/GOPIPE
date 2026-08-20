@@ -502,6 +502,21 @@ async def legend_count(
 # 「修正 → 学習の堀」「Excel 出力」を REST 化する。
 # --------------------------------------------------------------------------
 
+@app.get("/suppressions")
+async def suppressions(org_slug: str = "", x_gopipe_key: str | None = Header(default=None)):
+    """この会社が「要らない」と繰り返し消してきた品目（拾わないことの学習）。
+
+    見えない学習は暴走する。何を学んだかを人が読めて、間違いなら消せる状態にしておく。
+    """
+    _require_org_read(org_slug, x_gopipe_key)
+    from gopipe_takeoff import store
+
+    if not store.is_enabled():
+        return {"count": 0, "items": [], "note": "Supabase 未設定"}
+    items = store.load_suppressions(org_slug or "default")
+    return {"count": len(items), "items": items}
+
+
 @app.post("/learn")
 async def learn(
     payload: dict = Body(...),

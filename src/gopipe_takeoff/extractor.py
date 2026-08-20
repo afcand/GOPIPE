@@ -81,6 +81,60 @@ def _learned_hint() -> str:
         return ""
 
 
+def load_suppressions() -> list[dict]:
+    """この会社が「要らない」と繰り返し消してきた品目（拾わないことの学習）。"""
+    try:
+        import os
+
+        from . import store
+
+        if not store.is_enabled():
+            return []
+        return store.load_suppressions(os.environ.get("GOPIPE_ORG") or "default")
+    except Exception:  # noqa: BLE001  学習が引けなくても抽出は続ける
+        return []
+
+
+def _suppression_hint(sups: list[dict]) -> str:
+    """「この会社では拾わない」を抽出プロンプトへ差し込む。
+
+    🔴 ここで教えるだけにして、出てきた行を後段で黙って捨てない。
+    捨てると、学習が一度でも外れたときに **その品目が二度と表に出なくなる**。
+    拾い出しで一番怖いのは間違いより「無かったことになる」こと。
+    出てきたら印を付けて人に見せる（_mark_suppressed）。
+    """
+    if not sups:
+        return ""
+    lines = []
+    for x in sups[:60]:
+        spec = f"（例: {', '.join(x['specs'])}）" if x.get("specs") else ""
+        lines.append(f"- 「{x['name']}」{spec} … 過去{x['hits']}回・{x['projects']}物件で削除")
+    return (
+        "\n\n## この会社が「要らない」と消してきた品目（原則として拾わない）\n"
+        "下記は、この会社の積算担当が過去に繰り返し消した品目です。**原則として行に起こさないでください。**\n"
+        "ただし今回の図面で**明らかに工事対象**（施工範囲を示す色・記号・注記が付いている等）なら、\n"
+        "拾ったうえで location の末尾に「※要確認」と書いてください。黙って落とさないこと。\n"
+        + "\n".join(lines)
+    )
+
+
+def _mark_suppressed(items: list[TakeoffItem], sups: list[dict]) -> int:
+    """学習で「拾わない」とした品目が出てきたら印を付ける（消さない）。
+
+    Returns: 印を付けた行数。
+    """
+    if not sups:
+        return 0
+    keys = {_norm(x["name"]) for x in sups}
+    n = 0
+    for it in items:
+        if _norm(it.raw_name or it.name) in keys or _norm(it.name) in keys:
+            it.source = "suppressed_hit"
+            it.confidence = min(it.confidence, 0.5)
+            n += 1
+    return n
+
+
 def _strip_code_fence(text: str) -> str:
     m = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL)
     return m.group(1) if m else text
@@ -477,7 +531,14 @@ def extract(
     抽出し、vision 結果と突合する（数量・型番を機器表優先で採用、拾い漏れを補完）。
     """
     client = client or get_llm_client()
-    system_prompt = _load_prompt(resolve_knowledge("extraction.txt")) + _learned_hint()
+    sups = load_suppressions()
+    if sups:
+        logger.info("拾わない学習: %d品目（過去に消された品目をプロンプトで教える）", len(sups))
+    system_prompt = (
+        _load_prompt(resolve_knowledge("extraction.txt"))
+        + _learned_hint()
+        + _suppression_hint(sups)
+    )
     verify_prompt  = _load_prompt(resolve_knowledge("verification.txt")) if two_pass else ""
     all_items: list[TakeoffItem] = []
 
@@ -599,5 +660,12 @@ def extract(
                 )
 
         all_items.extend(page_items)
+
+    if sups:
+        hit = _mark_suppressed(all_items, sups)
+        if hit:
+            logger.info(
+                "拾わない学習: %d行が「消したはずの品目」として出てきた（消さずに印を付けた）", hit
+            )
 
     return all_items
