@@ -25,7 +25,7 @@ from PIL import Image, ImageDraw  # noqa: E402
 from llm_client.base import LLMResponse  # noqa: E402
 
 from gopipe_takeoff.cv_count import crop_template, recount  # noqa: E402
-from gopipe_takeoff.extractor import _item_key, extract  # noqa: E402
+from gopipe_takeoff.extractor import _item_key, _shape_key, extract  # noqa: E402
 from gopipe_takeoff.models import Drawing, DrawingPage, TakeoffItem, Tile  # noqa: E402
 
 
@@ -102,7 +102,7 @@ def test_machine_count_compares_against_group_total_across_locations():
     b = _item(1)
     b.location = "役員室2"       # 役員室2に1個 → 合計3個
     templates = {_item_key(a): [tpl], _item_key(b): [tpl2]}
-    notes = recount(page, [a, b], templates, item_key=_item_key)
+    notes = recount(page, [a, b], templates, item_key=_item_key, group_key=_shape_key)
     assert a.qty_cv == 3 and b.qty_cv == 3, "qty_cv は図面全体の機械計数"
     assert a.quantity == 2 and b.quantity == 1, "行の数量は動かさない"
     assert a.confidence >= 0.85 and b.confidence >= 0.85, "合計3=機械3で一致"

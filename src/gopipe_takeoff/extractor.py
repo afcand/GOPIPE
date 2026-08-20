@@ -82,6 +82,34 @@ def _learned_hint() -> str:
         return ""
 
 
+def _paint_colors(page: DrawingPage, items: list[TakeoffItem], meanings: dict[str, dict]) -> int:
+    """行の位置から図面の色を実測して貼る（AIには色を聞かない）。
+
+    🔴前処理前の原画で測る。自動コントラスト＋鮮鋭化は小さい字をAIに読ませるための
+    もので彩度を削り、実測で青ダクトの色画素が76%減って判定下限を割った。
+    """
+    src = page.image_raw or page.image_png
+    if not src:
+        return 0
+    painted = 0
+    for it in items:
+        if it.bbox is None:
+            continue
+        got = sample_region(src, (it.bbox.x0, it.bbox.y0, it.bbox.x1, it.bbox.y1))
+        if not got:
+            continue
+        it.color = got["color"]
+        it.color_hue = got["hue"]
+        # 辞書に無い色は意味を付けない（推測で埋めると見積が丸ごと狂う）
+        m = meanings.get(got["color"])
+        if m:
+            it.color_meaning = m.get("meaning")
+        painted += 1
+    if painted:
+        logger.info("page %d: %d行に色を貼った（機械で実測）", page.page, painted)
+    return painted
+
+
 def load_color_meanings() -> dict[str, dict]:
     """この会社が決めた「色 → 意味」。無ければ空（色名だけ貼る）。"""
     try:
@@ -268,12 +296,31 @@ def _item_key(it: TakeoffItem) -> tuple:
     単位を鍵に含めるのが要点。含めないと「ダクト400×400 を m で見た行」と
     「同じものを m2 で見た行」が同じ鍵になり、20m と 8m2 を足す/選ぶという
     意味の無い演算が起きる。単位が食い違うなら、それは人に見せるべき不一致。
+
+    🔴図面の色も鍵に含める。設備図は色で工事区分（既存再利用/移設/新設）を分けており、
+    それは**ダクト1本ごとの属性**で、品目や口径の属性ではない。
+    実測(2026-08-20 資料③): 9径中4径が青と橙の**両方**に実在した。
+    色を鍵に入れないと「φ200 12m」の1行に既存と新設が混ざり、
+    既存を新設として見積もる（数量が合っていても金額が丸ごと狂う）。
     """
     loc = _norm(it.location)
     unit = _norm(it.unit)
+    col = _norm(it.color)  # 色が測れなかった行は "" ＝ 互いに集約される
     if it.spec and it.spec.strip():
-        return ("spec", _norm(it.spec), unit, loc)
-    return ("catname", _norm(it.category), _norm(it.name), unit, loc)
+        return ("spec", _norm(it.spec), unit, loc, col)
+    return ("catname", _norm(it.category), _norm(it.name), unit, loc, col)
+
+
+def _shape_key(it: TakeoffItem) -> tuple:
+    """機械照合と突き合わせるための鍵＝「同じ形の記号」。
+
+    機械はページ全体を記号の**形**で数える。場所も色も見分けられないので、
+    比べる相手は場所・色をまたいだ同種の合計でなければならない。
+    （鍵の末尾を落として作ると、鍵の並びを変えた瞬間に静かに壊れる。実際に壊した。）
+    """
+    if it.spec and it.spec.strip():
+        return ("spec", _norm(it.spec), _norm(it.unit))
+    return ("catname", _norm(it.category), _norm(it.name), _norm(it.unit))
 
 
 def _dedupe_items(items: list[TakeoffItem]) -> list[TakeoffItem]:
@@ -324,9 +371,6 @@ def _merge_tile_items(items: list[TakeoffItem]) -> list[TakeoffItem]:
             cur.bbox = it.bbox
         if _BASIS_DOUBT.get(it.qty_basis or "none", 4) > _BASIS_DOUBT.get(cur.qty_basis or "none", 4):
             cur.qty_basis = it.qty_basis
-        if cur.color is None and it.color is not None:
-            cur.color, cur.color_hue = it.color, it.color_hue
-            cur.color_meaning = it.color_meaning
         n_src[key] += 1
     for key, n in n_src.items():
         if n > 1:
@@ -619,6 +663,10 @@ def extract(
                         conv = tile_box_to_page(tile, it.bbox)
                         it.bbox = BBox.from_list(list(conv)) if conv else None
                 tile_items.extend(got)
+            # 🔴色は集約の**前**に測る。集約キーに工事区分を入れるため、
+            # 「φ200の青」と「φ200の橙」が別行として残る必要がある
+            # （実測: 9径中4径が青と橙の両方に実在する。集約後に測ると片方の色に化ける）。
+            _paint_colors(page, tile_items, meanings)
             before = len(tile_items)
             page_items = _merge_tile_items(tile_items)
             logger.info("page %d: pass1 %d行 → %d行（タイル間は合算）", page.page, before, len(page_items))
@@ -639,6 +687,7 @@ def extract(
                     failures.append(str(e))
                 continue
             logger.info("page %d: pass1 extracted %d items", page.page, len(page_items))
+            _paint_colors(page, page_items, meanings)
 
         # ---- Pass 2: Verification (two_pass=True のみ) ----
         if two_pass and verify_prompt and page.image_png:
@@ -664,31 +713,6 @@ def extract(
             page_items = _dedupe_items(combined)
             logger.info("page %d: after dedup %d → %d items", page.page, before, len(page_items))
 
-        # ---- 図面の色を測って行に貼る（AIに色を聞かない）----
-        # 集約が終わった後の行に貼る。集約前に貼ると、統合で消える側を塗って空振りする。
-        color_src = page.image_raw or page.image_png
-        if color_src:
-            painted = 0
-            for it in page_items:
-                if it.bbox is None:
-                    continue
-                got = sample_region(
-                    color_src, (it.bbox.x0, it.bbox.y0, it.bbox.x1, it.bbox.y1)
-                )
-                if got:
-                    it.color = got["color"]
-                    it.color_hue = got["hue"]
-                    # 辞書に無い色は意味を付けない（推測で埋めると見積が狂う）
-                    m = meanings.get(got["color"])
-                    if m:
-                        it.color_meaning = m.get("meaning")
-                    painted += 1
-            if painted:
-                logger.info(
-                    "page %d: %d行に色を貼った（機械で実測・意味の対応付けは会社の辞書）",
-                    page.page, painted,
-                )
-
         # ---- 個数モノのCV検算（記号テンプレート照合で数え直す）----
         if templates and page.image_png:
             try:
@@ -700,7 +724,8 @@ def extract(
                 tiled_w = sum((t.core[2] - t.core[0]) * t.width for t in row0)
                 hint = (page.width / tiled_w) if tiled_w else 1.0
                 for note in recount(
-                    page.image_png, page_items, templates, item_key=_item_key, scale_hint=hint
+                    page.image_png, page_items, templates, item_key=_item_key,
+                    group_key=_shape_key, scale_hint=hint,
                 ):
                     logger.info("page %d: %s", page.page, note)
             except Exception as e:  # noqa: BLE001  検算層の失敗で抽出を道連れにしない

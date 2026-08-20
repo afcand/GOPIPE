@@ -102,6 +102,7 @@ def recount(
     templates: dict[tuple, list[bytes]],
     *,
     item_key,
+    group_key=None,
     scale_hint: float = 1.0,
     adopt: bool | None = None,
 ) -> list[str]:
@@ -124,10 +125,9 @@ def recount(
     # 行は場所ごとに分かれている（役員室1の排煙口2個・役員室2の1個…）のに、
     # 機械はページ全体を数える。行と比べると物差し違いの比較になり、
     # 偶然の一致に確度を上げてしまう（実測で露呈）。必ず同種合計と比べる。
-    def _group_key(it: TakeoffItem) -> tuple:
-        key = item_key(it)
-        # item_key = ("spec", spec, unit, loc) | ("catname", cat, name, unit, loc)
-        return key[:-1]
+    # 🔴鍵の末尾を落として作らない。鍵の並びが変わると静かに壊れる
+    # （実際、集約キーに色を足した日に場所ではなく色を落として壊した）。
+    _group_key = group_key or (lambda it: item_key(it)[:-1])
 
     groups: dict[tuple, list[TakeoffItem]] = {}
     pooled: dict[tuple, list[bytes]] = {}
