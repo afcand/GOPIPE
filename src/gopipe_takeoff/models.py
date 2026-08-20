@@ -55,6 +55,9 @@ class TakeoffItem(BaseModel):
     # 取り違えると数量が合っていても見積が丸ごと狂うので、AIに聞かず画素から測る。
     color: str | None = None       # "青" / "橙茶" など
     color_hue: float | None = None  # 実測した色相（度）。会社ごとの辞書と突き合わせる鍵
+    # その色が会社の辞書で何を意味するか（既存再利用/移設/新設 など）。
+    # 辞書に無い色は None のまま＝推測で埋めない。埋めると見積が丸ごと狂う。
+    color_meaning: str | None = None
 
 
 class Tile(BaseModel):

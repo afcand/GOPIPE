@@ -146,6 +146,7 @@ def replace_takeoff_items(
     body = [
         {
             "project_id": project_id, "org_id": org_id, "drawing_id": drawing_id,
+            "color": it.color, "color_hue": it.color_hue,
             "category": it.category, "name": it.name, "spec": it.spec,
             "location": it.location, "quantity": it.quantity,
             "unit": it.unit, "confidence": it.confidence,
@@ -299,6 +300,73 @@ def load_suppressions(org_slug: str, *, min_hits: int = 2, limit: int = 200) -> 
     ]
     out.sort(key=lambda x: (-x["hits"], x["name"]))
     return out[:limit]
+
+
+def load_color_meanings(org_slug: str) -> dict[str, dict]:
+    """会社が決めた「色 → 意味」。{色: {meaning, note}}。
+
+    🔴 図面の色の意味は会社ごと・図面ごとにしか決まらない
+    （実測: 5枚で「ダクト」が5通りの色。凡例があったのは1枚だけ）。
+    共通辞書に流用すると「既存を新設で拾う」事故になるので、必ず org で閉じる。
+    """
+    org_id = ensure_org(org_slug, org_slug)
+    rows = _req(
+        "GET", "color_meanings",
+        params=f"?org_id=eq.{org_id}&select=color,meaning,note&order=color",
+    )
+    return {
+        r["color"]: {"meaning": r.get("meaning"), "note": r.get("note")}
+        for r in (rows or [])
+    }
+
+
+def save_color_meaning(org_slug: str, color: str, meaning: str, note: str | None = None) -> bool:
+    """色の意味を1件覚える（同じ色は上書き）。"""
+    org_id = ensure_org(org_slug, org_slug)
+    _req(
+        "POST", "color_meanings",
+        body=[{"org_id": org_id, "color": color, "meaning": meaning,
+               "note": note, "updated_at": "now()"}],
+        prefer="resolution=merge-duplicates,return=minimal",
+        params="?on_conflict=org_id,color",
+    )
+    return True
+
+
+def delete_color_meaning(org_slug: str, color: str) -> bool:
+    org_id = ensure_org(org_slug, org_slug)
+    _req("DELETE", "color_meanings",
+         params=f"?org_id=eq.{org_id}&color=eq.{urllib.parse.quote(color)}")
+    return True
+
+
+def seen_colors(org_slug: str, limit: int = 4000) -> list[dict]:
+    """この会社の図面に実際に出てきた色と件数。
+
+    何色が出るか分からないと「何を聞けばよいか」も決まらない。
+    人に出す質問は、実在する色の分だけにする（実験Gの「人へ1問だけ出す」）。
+    """
+    org_id = ensure_org(org_slug, org_slug)
+    rows = _req(
+        "GET", "takeoff_items",
+        params=f"?org_id=eq.{org_id}&color=not.is.null&select=color,color_hue&limit={limit}",
+    )
+    agg: dict[str, dict] = {}
+    for r in (rows or []):
+        c = r.get("color")
+        if not c:
+            continue
+        cur = agg.setdefault(c, {"color": c, "count": 0, "hues": []})
+        cur["count"] += 1
+        if r.get("color_hue") is not None:
+            cur["hues"].append(float(r["color_hue"]))
+    out = []
+    for v in agg.values():
+        hues = v.pop("hues")
+        v["hue"] = round(sum(hues) / len(hues), 1) if hues else None
+        out.append(v)
+    out.sort(key=lambda x: -x["count"])
+    return out
 
 
 def download_drawing(storage_path: str) -> bytes:

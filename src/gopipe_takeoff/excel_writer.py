@@ -85,7 +85,8 @@ def write_excel(items: list[TakeoffItem], out_path: str | Path) -> Path:
                 # 図面上でその部材が描かれていた色（機械で実測）。設備図は色で
                 # 既存再利用/移設/新設や系統を分ける。色が付いていない＝黒だけの
                 # 部材は空欄にする（「その他」に混ぜない）。
-                it.color or "",
+                (f"{it.color}（{it.color_meaning}）" if it.color and it.color_meaning
+                 else (it.color or "")),
                 it.page,
                 _note(it),
             ]

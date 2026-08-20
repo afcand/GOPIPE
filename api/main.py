@@ -89,6 +89,7 @@ def _items_json(items) -> list[dict]:
             # 参考値: 位置の指定がAI任せのため、寸法の引出線を測ることがある。
             "color": it.color,
             "color_hue": it.color_hue,
+            "color_meaning": it.color_meaning,
             "source": it.source,
             "checks": flags.get(i, []),
             # 学習の鍵。表示名を鍵にすると、直すたびに別部材まで巻き添えで化ける。
@@ -519,6 +520,45 @@ async def suppressions(org_slug: str = "", x_gopipe_key: str | None = Header(def
         return {"count": 0, "items": [], "note": "Supabase 未設定"}
     items = store.load_suppressions(org_slug or "default")
     return {"count": len(items), "items": items}
+
+
+@app.get("/color_meanings")
+async def get_color_meanings(org_slug: str = "", x_gopipe_key: str | None = Header(default=None)):
+    """会社が決めた「色 → 意味」と、図面に実際に出てきた色。
+
+    実在する色だけを人に聞く（辞書の口に出す選択肢）。5枚の実測で「ダクト」が
+    5通りの色だったように、色の意味は会社ごと図面ごとにしか決まらない。
+    """
+    _require_org_read(org_slug, x_gopipe_key)
+    from gopipe_takeoff import store
+
+    if not store.is_enabled():
+        return {"meanings": {}, "seen": [], "note": "Supabase 未設定"}
+    org = org_slug or "default"
+    return {"meanings": store.load_color_meanings(org), "seen": store.seen_colors(org)}
+
+
+@app.post("/color_meanings")
+async def put_color_meaning(
+    payload: dict = Body(...),
+    x_gopipe_key: str | None = Header(default=None),
+):
+    """色の意味を覚える／消す。書き込みなので鍵必須。"""
+    org_slug = str(payload.get("org_slug") or "").strip()
+    color = str(payload.get("color") or "").strip()
+    if not org_slug or not color:
+        raise HTTPException(status_code=400, detail="org_slug と color は必須です")
+    _require_key(x_gopipe_key, "色の辞書の更新")
+    from gopipe_takeoff import store
+
+    if not store.is_enabled():
+        raise HTTPException(status_code=503, detail="Supabase 未設定")
+    meaning = str(payload.get("meaning") or "").strip()
+    if not meaning:
+        store.delete_color_meaning(org_slug, color)
+        return {"ok": True, "deleted": color}
+    store.save_color_meaning(org_slug, color, meaning, payload.get("note"))
+    return {"ok": True, "color": color, "meaning": meaning}
 
 
 @app.post("/learn")

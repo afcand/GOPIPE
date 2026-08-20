@@ -82,6 +82,20 @@ def _learned_hint() -> str:
         return ""
 
 
+def load_color_meanings() -> dict[str, dict]:
+    """この会社が決めた「色 → 意味」。無ければ空（色名だけ貼る）。"""
+    try:
+        import os
+
+        from . import store
+
+        if not store.is_enabled():
+            return {}
+        return store.load_color_meanings(os.environ.get("GOPIPE_ORG") or "default")
+    except Exception:  # noqa: BLE001  辞書が引けなくても拾い出しは続ける
+        return {}
+
+
 def load_suppressions() -> list[dict]:
     """この会社が「要らない」と繰り返し消してきた品目（拾わないことの学習）。"""
     try:
@@ -312,6 +326,7 @@ def _merge_tile_items(items: list[TakeoffItem]) -> list[TakeoffItem]:
             cur.qty_basis = it.qty_basis
         if cur.color is None and it.color is not None:
             cur.color, cur.color_hue = it.color, it.color_hue
+            cur.color_meaning = it.color_meaning
         n_src[key] += 1
     for key, n in n_src.items():
         if n > 1:
@@ -541,6 +556,9 @@ def extract(
     抽出し、vision 結果と突合する（数量・型番を機器表優先で採用、拾い漏れを補完）。
     """
     client = client or get_llm_client()
+    meanings = load_color_meanings()
+    if meanings:
+        logger.info("色の辞書: %s", "／".join(f"{k}={v['meaning']}" for k, v in meanings.items()))
     sups = load_suppressions()
     if sups:
         logger.info("拾わない学習: %d品目（過去に消された品目をプロンプトで教える）", len(sups))
@@ -660,6 +678,10 @@ def extract(
                 if got:
                     it.color = got["color"]
                     it.color_hue = got["hue"]
+                    # 辞書に無い色は意味を付けない（推測で埋めると見積が狂う）
+                    m = meanings.get(got["color"])
+                    if m:
+                        it.color_meaning = m.get("meaning")
                     painted += 1
             if painted:
                 logger.info(
