@@ -217,7 +217,7 @@ def plan_tiles(
 
 def _render_tiles(
     page, *, rows: int, cols: int, dpi: int, enhance: bool = False, jpeg: bool = False,
-    margin: float = TILE_MARGIN,
+    margin: float = TILE_MARGIN, page_w_px: float = 0.0, page_h_px: float = 0.0,
 ) -> list[Tile]:
     """ページを rows×cols に切り、各タイルを個別レンダリングする。
 
@@ -256,10 +256,18 @@ def _render_tiles(
                 page.number + 1, row, rows, col, cols, used, w, h, len(data) / 1024,
                 effective_dpi(w, h, used),
             )
+            # このタイルがページ画像のどこを覆うか。ページ画像は rect 全体を
+            # page_scale で描いたものなので、pt から画素へ直せる。
+            sx = page_w_px / max(rect.width, 1e-6)
+            sy = page_h_px / max(rect.height, 1e-6)
             tiles.append(
                 Tile(
                     image_png=data, row=row, col=col, rows=rows, cols=cols,
                     grid=max(rows, cols), width=w, height=h, core=core,
+                    page_rect=[
+                        (ex0 - rect.x0) * sx, (ey0 - rect.y0) * sy,
+                        (ex1 - rect.x0) * sx, (ey1 - rect.y0) * sy,
+                    ],
                 )
             )
     return tiles
@@ -297,6 +305,7 @@ def load_pdf(
             data, w, h, used_dpi = _render_within_limit(page, dpi=dpi, jpeg=is_scan)
             if used_dpi != dpi:
                 logger.info("page %d rendered at %d dpi (downscaled from %d)", i, used_dpi, dpi)
+            raw = data  # 色の実測用に、前処理を掛ける前の画を取っておく
             if is_scan:
                 _enh = _enhance(data, jpeg=True)
                 if len(_enh) <= MAX_IMAGE_BYTES:
@@ -333,10 +342,12 @@ def load_pdf(
             if rows * cols > 1:
                 tiles = _render_tiles(
                     page, rows=rows, cols=cols, dpi=t_dpi, enhance=is_scan, jpeg=is_scan,
+                    page_w_px=w, page_h_px=h,
                 )
             pages.append(
                 DrawingPage(
                     page=i, width=w, height=h, text=text, image_png=data, tiles=tiles,
+                    image_raw=raw,
                 )
             )
         doc.close()

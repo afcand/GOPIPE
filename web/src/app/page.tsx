@@ -116,6 +116,8 @@ export default function Home() {
             qty_basis: r.qty_basis ?? null,
             qty_cv: r.qty_cv ?? null,
             source: r.source ?? null,
+            color: r.color ?? null,
+            color_hue: r.color_hue ?? null,
             page: r.page ?? 1,
           })),
         }),

@@ -34,6 +34,9 @@ export type TakeoffItem = {
   qty_cv?: number | null;
   /** 抽出の由来（reconciled / cv_count / suppressed_hit など） */
   source?: string | null;
+  /** 図面上でその部材が描かれていた色（機械で実測・参考値） */
+  color?: string | null;
+  color_hue?: number | null;
 };
 
 /** 🔴＝要確認。Streamlit 版と同じ 0.7 / 0.85 の線を守る。 */

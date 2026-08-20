@@ -85,6 +85,10 @@ def _items_json(items) -> list[dict]:
             # Web経由の Excel から「確かな数」と「推定」の区別が消える。
             "qty_basis": it.qty_basis,
             "qty_cv": it.qty_cv,
+            # 図面上の色（機械で実測）。設備図は色で既存再利用/移設/新設を分ける。
+            # 参考値: 位置の指定がAI任せのため、寸法の引出線を測ることがある。
+            "color": it.color,
+            "color_hue": it.color_hue,
             "source": it.source,
             "checks": flags.get(i, []),
             # 学習の鍵。表示名を鍵にすると、直すたびに別部材まで巻き添えで化ける。
@@ -599,6 +603,8 @@ async def export_xlsx(payload: dict = Body(...)):
             # 備考の「図面の表から／🔴AI推定（要検算）」が全部消える。
             qty_basis=(r.get("qty_basis") or None),
             qty_cv=(float(r["qty_cv"]) if r.get("qty_cv") is not None else None),
+            color=(r.get("color") or None),
+            color_hue=(float(r["color_hue"]) if r.get("color_hue") is not None else None),
             source=(r.get("source") or None),
         )
         for r in rows

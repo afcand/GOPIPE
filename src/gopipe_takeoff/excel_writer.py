@@ -9,7 +9,7 @@ from openpyxl.utils import get_column_letter
 
 from .models import TakeoffItem
 
-HEADER = ["No", "カテゴリ", "名称", "仕様", "場所", "数量", "単位", "ページ", "備考"]
+HEADER = ["No", "カテゴリ", "名称", "仕様", "場所", "数量", "単位", "図面の色(参考)", "ページ", "備考"]
 
 
 # 数量をどう出したか → 現場が読む日本語。「AIが出した数字」を一列で信用させないため、
@@ -82,6 +82,10 @@ def write_excel(items: list[TakeoffItem], out_path: str | Path) -> Path:
                 it.location or "",
                 it.quantity,
                 it.unit,
+                # 図面上でその部材が描かれていた色（機械で実測）。設備図は色で
+                # 既存再利用/移設/新設や系統を分ける。色が付いていない＝黒だけの
+                # 部材は空欄にする（「その他」に混ぜない）。
+                it.color or "",
                 it.page,
                 _note(it),
             ]
@@ -104,7 +108,7 @@ def write_excel(items: list[TakeoffItem], out_path: str | Path) -> Path:
         c.fill = header_fill
         c.alignment = center
 
-    widths = [5, 14, 22, 24, 14, 9, 7, 7, 24]
+    widths = [5, 14, 22, 24, 14, 9, 7, 9, 7, 24]  # 図面の色 を追加
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     for i, w in enumerate([16, 8, 18, 12], start=1):

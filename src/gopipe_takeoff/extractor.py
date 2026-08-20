@@ -11,6 +11,7 @@ from pathlib import Path
 
 from llm_client import LLMClient, LLMMessage, get_llm_client
 
+from .color_sample import sample_region, tile_box_to_page
 from .equipment_table import extract_from_text
 from .locale import resolve as resolve_knowledge
 from .models import BBox, Drawing, DrawingPage, TakeoffItem, Tile
@@ -309,6 +310,8 @@ def _merge_tile_items(items: list[TakeoffItem]) -> list[TakeoffItem]:
             cur.bbox = it.bbox
         if _BASIS_DOUBT.get(it.qty_basis or "none", 4) > _BASIS_DOUBT.get(cur.qty_basis or "none", 4):
             cur.qty_basis = it.qty_basis
+        if cur.color is None and it.color is not None:
+            cur.color, cur.color_hue = it.color, it.color_hue
         n_src[key] += 1
     for key, n in n_src.items():
         if n > 1:
@@ -435,9 +438,16 @@ def _tile_user_text(page: DrawingPage, tile: Tile, symbol_codes: list[str]) -> s
         f"{tile.row + 1}行目 {tile.col + 1}列目 (row={tile.row}, col={tile.col})\n"
         f"{core_rule}"
         f"この区画から拾い出し項目を JSON 配列で返してください。\n"
-        f"単位が「個」の行は bbox を必ず入れてください: その記号の**代表1個だけ**を"
-        f"ぴったり囲む [x0,y0,x1,y1]（この画像のピクセル座標）。複数個をまとめて囲まない。"
-        f"機械照合が同じ絵を数えるための見本に使います（見本が正確なほど検算が効きます）。\n"
+        f"🔴**すべての行に bbox を入れてください**: [x0,y0,x1,y1]（この画像のピクセル座標）。\n"
+        f"  ・単位が「個」の行 … その記号の**代表1個だけ**をぴったり囲む（複数個をまとめて囲まない）\n"
+        f"  ・配管・ダクトの行 … その管が**最もはっきり描かれている区間を1つ**、線の太さぶんだけ囲む\n"
+        f"    （系統全体を囲まない。囲みが大きいと他の色が混ざって系統の判定が狂います）\n"
+        f"    🔴**寸法の文字・引出線・注記を囲まない。**「200φ」「FL+3,065」等の文字ではなく、\n"
+        f"    **描かれている管そのものの線**を囲んでください。文字と管は色が違うことがあり、\n"
+        f"    文字を囲むと系統を取り違えます（実測: 寸法文字は青、同じ径の管の本体は橙）。\n"
+        f"  ・機器・器具の行 … その機器の外形を囲む\n"
+        f"bbox は2つに使います: 同じ絵を機械が数え直すための見本と、"
+        f"**その部材が何色で描かれているか**の実測（設備図は色で既存再利用・移設・新設を分けるため）。\n"
         f"テキスト層 (ページ全体): {(page.text or '(なし)')[:2000]}"
         f"{codes_hint}"
     )
@@ -585,8 +595,11 @@ def extract(
                     continue
                 for it in got:
                     _harvest_template(templates, it, tile)
-                    # タイル座標の bbox をページに載せると位置が嘘になるので捨てる
-                    it.bbox = None
+                    # タイル座標のままページに載せると位置が嘘になる。
+                    # 捨てずにページ座標へ直す＝ここが「色で系統を判定する」工事の入口。
+                    if it.bbox is not None:
+                        conv = tile_box_to_page(tile, it.bbox)
+                        it.bbox = BBox.from_list(list(conv)) if conv else None
                 tile_items.extend(got)
             before = len(tile_items)
             page_items = _merge_tile_items(tile_items)
@@ -632,6 +645,27 @@ def extract(
             before = len(combined)
             page_items = _dedupe_items(combined)
             logger.info("page %d: after dedup %d → %d items", page.page, before, len(page_items))
+
+        # ---- 図面の色を測って行に貼る（AIに色を聞かない）----
+        # 集約が終わった後の行に貼る。集約前に貼ると、統合で消える側を塗って空振りする。
+        color_src = page.image_raw or page.image_png
+        if color_src:
+            painted = 0
+            for it in page_items:
+                if it.bbox is None:
+                    continue
+                got = sample_region(
+                    color_src, (it.bbox.x0, it.bbox.y0, it.bbox.x1, it.bbox.y1)
+                )
+                if got:
+                    it.color = got["color"]
+                    it.color_hue = got["hue"]
+                    painted += 1
+            if painted:
+                logger.info(
+                    "page %d: %d行に色を貼った（機械で実測・意味の対応付けは会社の辞書）",
+                    page.page, painted,
+                )
 
         # ---- 個数モノのCV検算（記号テンプレート照合で数え直す）----
         if templates and page.image_png:

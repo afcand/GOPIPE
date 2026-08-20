@@ -50,6 +50,11 @@ class TakeoffItem(BaseModel):
     # 6/11 しか一致しない（実測2026-08-20）ため、決定的アルゴリズムの数を併記する。
     # None = 照合していない/踊り場が無く数えられなかった（そのときは数字を出さない）。
     qty_cv: float | None = None
+    # 図面上でその部材が描かれていた色（機械で測った実測値）。
+    # 設備図は色で系統・用途を分ける（既存再利用/移設/新設、SA/RA/OA/EA）。
+    # 取り違えると数量が合っていても見積が丸ごと狂うので、AIに聞かず画素から測る。
+    color: str | None = None       # "青" / "橙茶" など
+    color_hue: float | None = None  # 実測した色相（度）。会社ごとの辞書と突き合わせる鍵
 
 
 class Tile(BaseModel):
@@ -69,6 +74,10 @@ class Tile(BaseModel):
     # 外側は隣タイルとの重なり＝文脈用に見せるだけで、数えさせない領域。
     # これが無いと、重なりに写ったものを両方のタイルが出して二重計上になる。
     core: list[float] = Field(default_factory=lambda: [0.0, 0.0, 1.0, 1.0])
+    # このタイルがページ画像上のどこを覆っているか [x0,y0,x1,y1]（ページ画像のピクセル）。
+    # タイルで見つけた部材の位置をページへ戻すのに要る。これが無いと
+    # 「その部材が何色か」をページ画像から測れない（＝色で系統を判定できない）。
+    page_rect: list[float] = Field(default_factory=list)
 
     @property
     def n_rows(self) -> int:
@@ -87,6 +96,11 @@ class DrawingPage(BaseModel):
     height: float
     text: str = ""
     image_png: bytes | None = None  # 抽出に使うレンダリング画像 (フルページ)
+    # 🔴前処理（自動コントラスト＋鮮鋭化）を掛ける前の原画。**色の実測はこちらで行う**。
+    # 前処理は小さい字をAIに読ませるためのもので、彩度を削る。実測(2026-08-20 資料③):
+    # 青ダクトの色画素が 4292→1031(-76%)、インクに占める色の割合が 0.47→0.17 まで落ち、
+    # 判定の下限(0.18)を割って「色が付いていない」ことになっていた。
+    image_raw: bytes | None = None
     # tiles が非空なら抽出は tile 単位で行う (split > 1 のとき)。
     # image_png はマーカー描画や fallback 用に残しておく。
     tiles: list[Tile] = []
