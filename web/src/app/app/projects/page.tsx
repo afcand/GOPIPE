@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { currentMembership, supabaseServer } from "@/lib/supabase/server";
+import { stepIndex, stepLabel, PROJECT_STEPS } from "@/lib/projectStatus";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,7 @@ type ProjectRow = {
   title: string | null;
   slug: string;
   item_count: number | null;
+  status: string | null;
   updated_at: string | null;
   created_at: string | null;
 };
@@ -29,7 +31,7 @@ export default async function ProjectsPage() {
   const sb = await supabaseServer();
   const { data } = await sb
     .from("projects")
-    .select("id, title, slug, item_count, updated_at, created_at")
+    .select("id, title, slug, item_count, status, updated_at, created_at")
     .order("updated_at", { ascending: false })
     .limit(200);
   const projects = (data ?? []) as ProjectRow[];
@@ -72,7 +74,17 @@ export default async function ProjectsPage() {
                     <span className="block truncate text-[16px] font-bold">
                       {p.title?.trim() || p.slug}
                     </span>
-                    <span className="text-[12.5px] text-[var(--mut)]">
+                    <span className="flex flex-wrap items-center gap-2 text-[12.5px] text-[var(--mut)]">
+                      <span
+                        className={
+                          "rounded-full px-2.5 py-0.5 text-[11.5px] font-bold " +
+                          (stepIndex(p.status) >= PROJECT_STEPS.length - 1
+                            ? "bg-[rgba(86,204,242,0.18)] text-[var(--cyan)]"
+                            : "bg-[rgba(255,255,255,0.07)] text-[var(--ink)]")
+                        }
+                      >
+                        {stepIndex(p.status) + 1}/{PROJECT_STEPS.length} {stepLabel(p.status)}
+                      </span>
                       最終更新 {when(p.updated_at ?? p.created_at)}
                     </span>
                   </span>

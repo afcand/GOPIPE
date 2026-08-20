@@ -2,6 +2,7 @@ import { redirect, notFound } from "next/navigation";
 import Link from "next/link";
 import { currentMembership, supabaseServer } from "@/lib/supabase/server";
 import ProjectReview from "./ProjectReview";
+import ProjectSettings from "./ProjectSettings";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +19,7 @@ export default async function ProjectDetail({
   const sb = await supabaseServer();
   const { data: project } = await sb
     .from("projects")
-    .select("id, title, slug, item_count")
+    .select("id, title, slug, item_count, status, municipality, installed_year")
     .eq("id", id)
     .maybeSingle();
   if (!project) notFound();
@@ -81,6 +82,14 @@ export default async function ProjectDetail({
           </ul>
         </section>
       )}
+
+      <ProjectSettings
+        projectId={id}
+        status={project.status ?? "draft"}
+        title={project.title?.trim() || project.slug}
+        municipality={project.municipality ?? null}
+        installedYear={project.installed_year ?? null}
+      />
 
       <ProjectReview projectId={id} initialItems={items ?? []} />
     </main>
