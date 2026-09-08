@@ -31,7 +31,7 @@ def _note(it: TakeoffItem) -> str:
     # 印字を機械で数えた行に「要数え直し」は付けない。あれは画像認識の計数が
     # 2回かけると動くことへの注意書きで、決定的に数えたものには当てはまらない。
     # 両方並べると、どちらを信じればよいのか分からなくなる。
-    if it.source != "vector_text":
+    if it.source not in ("vector_text", "glyph_count"):
         basis = _BASIS_NOTE.get(it.qty_basis or "")
         if basis:
             parts.append(basis)
@@ -50,6 +50,10 @@ def _note(it: TakeoffItem) -> str:
         parts.append("機器表から抽出")
     elif it.source == "legend_count":
         parts.append("凡例から記号カウント")
+    elif it.source == "glyph_count":
+        # 図形を数えるのも決定的だが、同じ形を使う別記号を巻き込みうる。
+        # 名前が「AまたはB」になっている行は、そこを人が決める。
+        parts.append("凡例の図形と一致する記号を機械で数えた")
     elif it.source == "vector_text":
         # 印字を機械で数えたので数は動かない。ただし数えたのは「ラベル」であって
         # 部材ではない（1本のダクトに2箇所ラベルがあれば2になる）。ここを

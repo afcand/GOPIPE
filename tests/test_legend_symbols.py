@@ -105,3 +105,15 @@ def test_数えた結果は何度やっても同じ():
     b = ls.count_glyphs(page.get_drawings(), inside=inside)
     doc.close()
     assert [(g.key, g.count) for g in a] == [(g.key, g.count) for g in b]
+
+
+def test_図形を数えた行の備考は要数え直しにしない():
+    """『要数え直し』は画像認識の計数への注意書き。図形の計数は決定的なので付けない。"""
+    from gopipe_takeoff.excel_writer import _note
+    from gopipe_takeoff.models import TakeoffItem
+
+    it = TakeoffItem(page=1, name="振れ止め支持点", quantity=11, unit="個",
+                     source="glyph_count", qty_basis="count", confidence=0.75)
+    note = _note(it)
+    assert "要数え直し" not in note
+    assert "凡例の図形と一致する記号を機械で数えた" in note
