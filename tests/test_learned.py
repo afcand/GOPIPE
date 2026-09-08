@@ -121,7 +121,7 @@ def test_pipeline_merges_learned_aliases(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("gopipe_takeoff.pipeline.load_pdf", lambda p, grid=1: _EmptyDrawing())
     monkeypatch.setattr("gopipe_takeoff.pipeline.extract", lambda *a, **k: [])
-    monkeypatch.setattr("gopipe_takeoff.pipeline.write_excel", lambda items, path: path)
+    monkeypatch.setattr("gopipe_takeoff.pipeline.write_excel", lambda items, path, **kw: path)
 
     pipe.run("/nonexistent.pdf", tmp_path)
     assert "全熱交ユニット" in merged

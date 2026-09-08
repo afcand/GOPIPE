@@ -10,6 +10,7 @@ from .dictionary import TakeoffDictionary
 from .excel_writer import write_excel
 from .extractor import extract
 from .frame_filter import detect as detect_frame
+from .gap_report import find as find_gaps
 from .locale import resolve as resolve_knowledge
 from .marker import write_marker_pdf
 from .models import TakeoffItem
@@ -37,6 +38,9 @@ class TakeoffResult:
     unread_labels: list[tuple[int, str]] = field(default_factory=list)
     # 図枠・凡例・参照表として除外した文字の種類数。除外しすぎ／しなさすぎの検知用。
     frame_dropped: int = 0
+    # この図面にあるのに、この経路では数えられなかったもの（記号もの・延長 等）。
+    # 表に出ない部材は現場から見れば0個に見える。必ず画面・帳票まで運ぶ。
+    gaps: list = field(default_factory=list)
 
 
 class TakeoffPipeline:
@@ -100,6 +104,7 @@ class TakeoffPipeline:
         # 画像認識の計数は同じ図面を2回かけると動くが、印字を数えるのは決定的。
         unread: list[tuple[int, str]] = []
         frame_dropped = 0
+        vec: list[TakeoffItem] = []
         if use_vector_text and any(p.text_lines for p in drawing.pages):
             frame = detect_frame(drawing)
             frame_dropped = len(frame)
@@ -125,9 +130,17 @@ class TakeoffPipeline:
         logger.info("classifying ...")
         items = classify(raw_items, self.dictionary)
 
+        # 🔴 分類(classify)は辞書でカテゴリを塗り替えるため、拾えていないものの判定には
+        # **分類前のベクター項目**を渡す。分類後を渡すと『配管の延長が要る』が黙って消える。
+        gaps = find_gaps(drawing, vec) if any(p.text_lines for p in drawing.pages) else []
+        if gaps:
+            logger.info("拾えていないもの %d 件を申告します", len(gaps))
+            for g in gaps:
+                logger.info("  %s", g.line())
+
         excel_path = out_dir / "拾い出し表.xlsx"
         logger.info("writing excel: %s", excel_path)
-        write_excel(items, excel_path)
+        write_excel(items, excel_path, gaps=gaps, unread=unread, failures=failures)
 
         marker_path: Path | None = None
         if input_pdf.exists() and any(it.bbox for it in items):
@@ -142,7 +155,7 @@ class TakeoffPipeline:
         return TakeoffResult(
             items=items, excel_path=excel_path, marker_pdf_path=marker_path,
             failures=failures, llm_calls=llm_calls,
-            unread_labels=unread, frame_dropped=frame_dropped,
+            unread_labels=unread, frame_dropped=frame_dropped, gaps=gaps,
         )
 
 

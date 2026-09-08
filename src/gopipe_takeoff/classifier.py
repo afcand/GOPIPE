@@ -19,7 +19,10 @@ def classify(items: list[TakeoffItem], dictionary: TakeoffDictionary) -> list[Ta
         entry, exact = dictionary.resolve(it.name)
         update: dict = {"raw_name": it.raw_name or it.name}
         if entry is None:
-            update["category"] = "その他"
+            # 辞書に無くても、既に分かっているカテゴリは捨てない。
+            # ベクター図の印字から拾った項目は図面の凡例どおりの分類を持っている。
+            # それを「その他」で塗り潰すと、せっかく図面から読んだ区分が消える。
+            update["category"] = it.category or "その他"
         else:
             update["category"] = entry.category
             update["unit"] = it.unit or entry.unit

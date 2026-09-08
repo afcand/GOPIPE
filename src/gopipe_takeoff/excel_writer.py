@@ -28,9 +28,13 @@ _BASIS_NOTE = {
 def _note(it: TakeoffItem) -> str:
     """備考列の文言。数量の出所を最優先で示し、低信頼は要確認を添える。"""
     parts: list[str] = []
-    basis = _BASIS_NOTE.get(it.qty_basis or "")
-    if basis:
-        parts.append(basis)
+    # 印字を機械で数えた行に「要数え直し」は付けない。あれは画像認識の計数が
+    # 2回かけると動くことへの注意書きで、決定的に数えたものには当てはまらない。
+    # 両方並べると、どちらを信じればよいのか分からなくなる。
+    if it.source != "vector_text":
+        basis = _BASIS_NOTE.get(it.qty_basis or "")
+        if basis:
+            parts.append(basis)
     if it.qty_cv is not None:
         if it.source == "cv_count":
             parts.append(f"機械計数{it.qty_cv:g}個を採用(AI読み{(it.qty_vision or 0):g}個)")
@@ -56,7 +60,20 @@ def _note(it: TakeoffItem) -> str:
     return " / ".join(parts)
 
 
-def write_excel(items: list[TakeoffItem], out_path: str | Path) -> Path:
+def write_excel(
+    items: list[TakeoffItem],
+    out_path: str | Path,
+    *,
+    gaps: list | None = None,
+    unread: list[tuple[int, str]] | None = None,
+    failures: list[str] | None = None,
+) -> Path:
+    """拾い出し表を書く。
+
+    gaps / unread / failures は「この表に出てこないもの」。**必ず別シートに出す。**
+    出てこない部材は現場から見れば 0 個に見える。無いのではなく数えられなかった、
+    を紙の上で言葉にしないと、そのまま見積になる。
+    """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -116,6 +133,35 @@ def write_excel(items: list[TakeoffItem], out_path: str | Path) -> Path:
         c.font = header_font
         c.fill = header_fill
         c.alignment = center
+
+    # 「拾えていないもの」シート。空でも作る＝人が探しに行かなくて済むように。
+    ws3 = wb.create_sheet("拾えていないもの")
+    ws3.append(["区分", "何が", "なぜ拾えていないか", "どうすればよいか", "ページ"])
+    for col_idx in range(1, 6):
+        c = ws3.cell(row=1, column=col_idx)
+        c.font = header_font
+        c.fill = header_fill
+        c.alignment = center
+    for g in gaps or []:
+        ws3.append([
+            "この図面にあるが数えられない", g.item, g.reason, g.action,
+            "・".join(str(x) for x in g.pages[:20]),
+        ])
+    for pg, text in unread or []:
+        ws3.append([
+            "型に当てはめられなかった行", text,
+            "ラベルらしい書き方ですが、拾い出しの型に載せられませんでした",
+            "人の目で確認してください", str(pg),
+        ])
+    for f in failures or []:
+        ws3.append(["読み取れなかった", "", f, "", ""])
+    if not (gaps or unread or failures):
+        ws3.append(["", "拾えていないものは検出されませんでした", "", "", ""])
+    for col, w in zip("ABCDE", [26, 34, 54, 44, 18]):
+        ws3.column_dimensions[col].width = w
+    for row in ws3.iter_rows(min_row=2):
+        for c in row:
+            c.alignment = Alignment(wrap_text=True, vertical="top")
 
     widths = [5, 14, 22, 24, 14, 9, 7, 11, 9, 7, 24]  # 取付高さ・図面の色 を追加
     for i, w in enumerate(widths, start=1):

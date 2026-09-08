@@ -152,3 +152,24 @@ def test_同じ図面を二度かけても同じ数になる():
     a = {(i.name, i.spec, i.quantity) for i in vt.extract(dw)[0]}
     b = {(i.name, i.spec, i.quantity) for i in vt.extract(dw)[0]}
     assert a == b
+
+
+def test_辞書に無くても図面から読んだ区分は消えない():
+    """図面の凡例どおりの分類を「その他」で塗り潰さない。"""
+    from gopipe_takeoff.classifier import classify
+    from gopipe_takeoff.dictionary import TakeoffDictionary
+
+    dw = Drawing(source_path="t.pdf", pages=[_page(1, "M-001-01", [("EA 250φ", 0.2, 0.3)])])
+    items, _ = vt.extract(dw)
+    out = classify(items, TakeoffDictionary(entries=[]))
+    assert out[0].category == "ダクト（丸）"
+
+
+def test_印字を数えた行に要数え直しの注意書きを付けない():
+    """『要数え直し』は画像認識の計数が動くことへの注意。決定的な計数には付けない。"""
+    from gopipe_takeoff.excel_writer import _note
+
+    dw = Drawing(source_path="t.pdf", pages=[_page(1, "M-001-01", [("EA 250φ", 0.2, 0.3)])])
+    note = _note(vt.extract(dw)[0][0])
+    assert "要数え直し" not in note
+    assert "図面の印字を機械で数えた" in note
