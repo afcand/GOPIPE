@@ -318,8 +318,13 @@ def load_pdf(
     dpi: int = DEFAULT_DPI,
     grid: int = 1,
     tile_dpi: int | None = None,
+    render: bool = True,
 ) -> Drawing:
     """PDF をページ単位でレンダリング + テキスト抽出して返す。
+
+    render=False なら画像を作らない。ベクター図を印字だけで拾うときは画像が要らず、
+    A1 を何枚も描くのは時間の無駄になる（実測: 16枚で約20秒）。低解像度の警告も、
+    画像を送らない以上そもそも当てはまらないので出さない。
 
     grid > 1 のときは呼び出し側の明示指定として grid×grid に分割する。
     grid <= 1 のときは、**モデルに届く実効解像度**を見て自動でタイル分割する
@@ -341,6 +346,12 @@ def load_pdf(
             is_scan = len(text.strip()) < 50  # テキスト層が薄い=スキャン画像とみなす
             tlines = [] if is_scan else text_lines_of(page)
             nat = native_dpi(page)
+            if not render:
+                pages.append(DrawingPage(
+                    page=i, width=page.rect.width, height=page.rect.height,
+                    text=text, text_lines=tlines,
+                ))
+                continue
             # スキャンは JPEG。PNG だと byte 上限に当たって DPI が自動降格する。
             data, w, h, used_dpi = _render_within_limit(page, dpi=dpi, jpeg=is_scan)
             if used_dpi != dpi:

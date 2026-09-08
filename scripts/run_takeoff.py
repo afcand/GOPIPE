@@ -34,6 +34,12 @@ def main() -> int:
         "--grid", type=int, default=1, help="N×N タイル分割（API call は N^2 倍）。既定 1"
     )
     parser.add_argument(
+        "--no-llm", action="store_true", default=False,
+        help="画像認識を使わず、ベクター(CAD)PDFの印字だけで拾う。API呼び出し0回・費用0。"
+             "大判が何枚もあると1枚あたりのタイル予算が足りず実効解像度が落ちるため、"
+             "ベクター図ではこちらのほうが確かなことが多い",
+    )
+    parser.add_argument(
         "--two-pass", action="store_true", default=False,
         help="2 パス抽出。Pass1 通常 → Pass2 漏れ確認（+1 call/ページ）",
     )
@@ -52,9 +58,18 @@ def main() -> int:
 
     from gopipe_takeoff import run_takeoff
 
-    result = run_takeoff(args.input, args.out, grid=args.grid, two_pass=args.two_pass)
+    result = run_takeoff(args.input, args.out, grid=args.grid, two_pass=args.two_pass,
+                         use_llm=not args.no_llm)
     print(f"✓ {len(result.items)} 件の拾い出し項目を抽出しました "
           f"(LLM call {result.llm_calls} 回)")
+    if result.gaps:
+        print(f"  拾えていないもの {len(result.gaps)} 件（Excelの『拾えていないもの』シート）:")
+        for g in result.gaps:
+            print(f"    - {g.line()}")
+    if result.unread_labels:
+        print(f"  型に載らなかったラベル {len(result.unread_labels)} 件")
+    for f in result.failures:
+        print(f"  ⚠ {f}")
     print(f"  Excel: {result.excel_path}")
     if result.marker_pdf_path:
         print(f"  Marker PDF: {result.marker_pdf_path}")

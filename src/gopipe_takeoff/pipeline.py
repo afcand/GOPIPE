@@ -59,6 +59,7 @@ class TakeoffPipeline:
         two_pass: bool = False,
         use_text_table: bool = True,
         use_vector_text: bool = True,
+        use_llm: bool = True,
     ) -> TakeoffResult:
         """PDF → 拾い出し Excel + マーカー PDF を出力する。
 
@@ -75,29 +76,39 @@ class TakeoffPipeline:
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info("loading PDF: %s (grid=%d, two_pass=%s)", input_pdf, grid, two_pass)
-        drawing = load_pdf(input_pdf, grid=grid)
-        llm_calls = sum(len(p.tiles) or 1 for p in drawing.pages) + (
-            len(drawing.pages) if two_pass else 0
+        logger.info("loading PDF: %s (grid=%d, two_pass=%s, use_llm=%s)",
+                    input_pdf, grid, two_pass, use_llm)
+        drawing = load_pdf(input_pdf, grid=grid, render=use_llm)
+        llm_calls = 0 if not use_llm else (
+            sum(len(p.tiles) or 1 for p in drawing.pages)
+            + (len(drawing.pages) if two_pass else 0)
         )
         logger.info("pages=%d / LLM呼び出し予定=%d回", len(drawing.pages), llm_calls)
 
-        logger.info("extracting items via LLM (use_text_table=%s) ...", use_text_table)
         failures: list[str] = []
         # 🔴 タイル分割を見送って実効解像度が落ちたページは「読めていない」。
         # ログにだけ出しても誰も気づかない（実測2026-09-08: A1×23枚が実効47dpiで
         # 送られていた）。結果に載せて必ず画面まで運ぶ。
         for pg in drawing.pages:
-            if pg.low_res_dpi:
+            if pg.low_res_dpi and use_llm:
                 failures.append(
                     f"ページ{pg.page}: 実効{pg.low_res_dpi:.0f}dpi でしか送れていません"
                     f"（大判・多ページのため分割を見送り）。図面の表や小さい記号は"
                     f"読めていない可能性が高いので、この画像由来の数量は信用しないでください。"
                     f"分割したい場合は環境変数 GOPIPE_MAX_LLM_CALLS を上げて実行します。"
                 )
-        raw_items = extract(
-            drawing, two_pass=two_pass, use_text_table=use_text_table, failures=failures
-        )
+        # ベクター図は印字だけで拾えるので、画像認識を使わない選択ができる。
+        # 大判が何枚もあると1枚あたりのタイル予算が足りず実効解像度が落ちるうえ、
+        # 呼び出し回数ぶんの費用もかかる。読めない画から出た数量は足しても害になる。
+        if use_llm:
+            logger.info("extracting items via LLM (use_text_table=%s) ...", use_text_table)
+            raw_items = extract(
+                drawing, two_pass=two_pass, use_text_table=use_text_table, failures=failures
+            )
+        else:
+            logger.info("画像認識は使いません（印字だけで拾います）")
+            raw_items = []
+            llm_calls = 0
         logger.info("extracted=%d items (failures=%d)", len(raw_items), len(failures))
 
         # ベクター(CAD)PDFなら、印字から推定ゼロで拾える分をここで足す。
@@ -172,7 +183,9 @@ def run_takeoff(
     grid: int = 1,
     two_pass: bool = False,
     use_text_table: bool = True,
+    use_llm: bool = True,
 ) -> TakeoffResult:
     return TakeoffPipeline().run(
-        input_pdf, out_dir, grid=grid, two_pass=two_pass, use_text_table=use_text_table
+        input_pdf, out_dir, grid=grid, two_pass=two_pass, use_text_table=use_text_table,
+        use_llm=use_llm,
     )

@@ -119,7 +119,7 @@ def test_pipeline_merges_learned_aliases(monkeypatch, tmp_path):
     monkeypatch.setattr(
         pipe.dictionary, "add_learned", lambda a: merged.update(a) or len(a)
     )
-    monkeypatch.setattr("gopipe_takeoff.pipeline.load_pdf", lambda p, grid=1: _EmptyDrawing())
+    monkeypatch.setattr("gopipe_takeoff.pipeline.load_pdf", lambda p, grid=1, **kw: _EmptyDrawing())
     monkeypatch.setattr("gopipe_takeoff.pipeline.extract", lambda *a, **k: [])
     monkeypatch.setattr("gopipe_takeoff.pipeline.write_excel", lambda items, path, **kw: path)
 

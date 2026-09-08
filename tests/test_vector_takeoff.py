@@ -173,3 +173,26 @@ def test_印字を数えた行に要数え直しの注意書きを付けない()
     note = _note(vt.extract(dw)[0][0])
     assert "要数え直し" not in note
     assert "図面の印字を機械で数えた" in note
+
+
+def test_画像認識を使わない実行では画像を作らない(tmp_path, monkeypatch):
+    """ベクター図を印字だけで拾うとき、A1を何枚も描くのは時間の無駄。
+
+    低解像度の警告も、画像を送らない以上そもそも当てはまらないので出さない。
+    """
+    import fitz
+
+    from gopipe_takeoff.pipeline import TakeoffPipeline
+
+    doc = fitz.open()
+    for _ in range(3):
+        pg = doc.new_page(width=2384, height=1684)          # A1 横
+        pg.insert_text((100, 100), "M-001-01 EA 250")       # 図の中の文字
+    src = tmp_path / "v.pdf"
+    doc.save(src)
+    doc.close()
+
+    res = TakeoffPipeline().run(src, tmp_path / "out", use_llm=False)
+    assert res.llm_calls == 0
+    assert not res.failures            # 送っていない画像の解像度は警告しない
+    assert res.excel_path.exists()
