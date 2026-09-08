@@ -11,6 +11,7 @@ from .excel_writer import write_excel
 from .extractor import extract
 from .frame_filter import detect as detect_frame
 from .gap_report import Gap, find as find_gaps
+from .duct_geometry import measure_from_pdf as measure_ducts
 from .legend_symbols import count_from_pdf as count_glyph_symbols
 from .refrigerant import parse_size_table
 from .locale import resolve as resolve_knowledge
@@ -140,6 +141,17 @@ class TakeoffPipeline:
             except Exception as e:  # noqa: BLE001  記号が数えられなくても拾い出しは続ける
                 logger.warning("記号の計数に失敗: %s", e)
                 gunnamed = {}
+            # ダクトを幾何から測る。延長と展開面積は図面に文字が無く、ここでしか出ない。
+            try:
+                ditems, dnotes = measure_ducts(str(input_pdf), drawing, frame)
+                for n in dnotes:
+                    logger.info("ダクト実測 %s", n)
+                if ditems:
+                    total = sum(i.quantity for i in ditems if i.unit == "m")
+                    logger.info("ダクトの延長 %.1f m を測りました（%d行）", total, len(ditems))
+                vec += ditems
+            except Exception as e:  # noqa: BLE001
+                logger.warning("ダクトの実測に失敗: %s", e)
             raw_items = list(raw_items) + vec
 
         # その会社が育てた別名を辞書に混ぜてから分類する。これを忘れると、

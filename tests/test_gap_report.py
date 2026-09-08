@@ -117,3 +117,22 @@ def test_分類でカテゴリが塗り替えられても延長の宿題は消�
         it.category = "衛生設備"
     gaps = gap_report.find(dw, items)
     assert any("配管の延長" in g.item for g in gaps)
+
+
+def test_延長を測ったときは宿題の文面が変わる():
+    """測れているのに『出していません』と言い続けると、申告が嘘になる。"""
+    from gopipe_takeoff.models import TakeoffItem
+
+    pages = [_page(i, f"M-001-0{i}", [("SA 400×300", 0.2 + i * 0.05, 0.3)]) for i in range(1, 4)]
+    dw = Drawing(source_path="t.pdf", pages=pages)
+    items = _items(dw) + [
+        TakeoffItem(page=1, name="給気ダクト", spec="400×300", quantity=12.0, unit="m",
+                    category="ダクト（実測延長）", source="duct_geometry", qty_basis="measure"),
+        TakeoffItem(page=1, name="給気ダクト（展開面積）", spec="400×300", quantity=16.8,
+                    unit="m2", category="ダクト（実測延長）", source="duct_geometry",
+                    qty_basis="measure"),
+    ]
+    gaps = gap_report.find(dw, items)
+    assert not any(g.item == "ダクトの延長 m・角ダクトの面積 m2" for g in gaps)
+    g = next(g for g in gaps if "幾何から測った値" in g.item)
+    assert "断面図" in g.reason and "突き合わせて" in g.action

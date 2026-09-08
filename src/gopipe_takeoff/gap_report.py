@@ -113,12 +113,27 @@ def find(
     duct = sorted({i.page for i in items if _is(i, "ダクト")})
     pipe = sorted({i.page for i in items if _is(i, "配管", "管", "汚水", "通気", "給水", "ドレン")}
                   - set(duct))
-    if duct:
+    measured = [i for i in items if i.source == "duct_geometry"]
+    if duct and not measured:
         gaps.append(Gap(
             item="ダクトの延長 m・角ダクトの面積 m2",
             reason="図面に文字として書かれていません（線を追わないと出ません）",
             action="推定値は入れていません。人が図から測って記入してください",
             pages=duct,
+        ))
+    elif measured:
+        # 測れたときも、そのまま信じてよい数字ではない。何が混じりうるかを書く。
+        no_size = sum(1 for i in measured
+                      if i.unit == "m" and "呼び寸法は図面から取れず" in (i.spec or ""))
+        with_area = sum(1 for i in measured if i.unit == "m2")
+        gaps.append(Gap(
+            item="ダクトの延長 m・展開面積 m2（幾何から測った値）",
+            reason=f"塗り多角形の面積と周長から測りました。ただし断面図に描かれた"
+                   f"同じダクトが混じっている可能性があり、エルボや分岐は長方形として"
+                   f"解けないため含みません。展開面積を出せたのは{with_area}行で、"
+                   f"呼び寸法が図面から結びつかなかった行が{no_size}行あります",
+            action="1ゾーンだけ人の拾い出しと突き合わせて、ずれ方の癖を掴んでから使ってください",
+            pages=sorted({i.page for i in measured}),
         ))
     if pipe:
         gaps.append(Gap(
