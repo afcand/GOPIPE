@@ -37,6 +37,8 @@ MIN_PAGES = 3
 REPEAT_RATIO = 0.6
 # 座標の一致とみなす丸め桁（0.001 = 紙の 0.1%）。A1 長辺 841mm なら約 0.8mm。
 COORD_ND = 3
+# 図枠の居場所を測る升目の細かさ（紙をこの数で縦横に割る）。
+ZONE_N = 40
 # 図番から図面種別を取る（M-001-01 → M、PWC-005-01 → PWC）。種別ごとに図枠が違う。
 _SHEET_NO = re.compile(r"\b([A-Z]{1,4})-\d{2,4}-\d{1,3}\b")
 
@@ -48,12 +50,38 @@ class FrameReport:
     keys: set[tuple[str, str, float, float]] = field(default_factory=set)
     reasons: dict[tuple[str, str, float, float], str] = field(default_factory=dict)
     pages_by_kind: dict[str, int] = field(default_factory=dict)
+    _zone: dict[str, set[tuple[int, int]]] = field(default_factory=dict, repr=False)
 
     def is_frame(self, kind: str, line: TextLine) -> bool:
         return _key(kind, line) in self.keys
 
     def why(self, kind: str, line: TextLine) -> str | None:
         return self.reasons.get(_key(kind, line))
+
+    def zone(self, kind: str) -> set[tuple[int, int]]:
+        """図枠の文字が占めている区画（紙を ZONE_N 分割した粗い升目）。
+
+        図枠の文字があるところは凡例・参照表・タイトル欄であって、図そのものでは
+        ない。記号を数えるときにここを外すために使う。座標の決め打ち（右下25%など）
+        と違い、その紙の図枠が実際に居る場所から決まるので紙が変わっても効く。
+        """
+        if kind not in self._zone:
+            cells = {
+                (int(k[2] * ZONE_N), int(k[3] * ZONE_N))
+                for k in self.keys if k[0] == kind
+            }
+            # 升目1つ分ふくらませる（凡例の図形は文字の少し左にあるため）
+            grown = set()
+            for cx, cy in cells:
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        grown.add((cx + dx, cy + dy))
+            self._zone[kind] = grown
+        return self._zone[kind]
+
+    def in_frame_zone(self, kind: str, x: float, y: float) -> bool:
+        """紙に対する比率 (x, y) が図枠の側かどうか。"""
+        return (int(x * ZONE_N), int(y * ZONE_N)) in self.zone(kind)
 
     def __len__(self) -> int:  # 除外した文字の種類数
         return len(self.keys)

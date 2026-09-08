@@ -10,7 +10,8 @@ from .dictionary import TakeoffDictionary
 from .excel_writer import write_excel
 from .extractor import extract
 from .frame_filter import detect as detect_frame
-from .gap_report import find as find_gaps
+from .gap_report import Gap, find as find_gaps
+from .legend_symbols import count_from_pdf as count_glyph_symbols
 from .refrigerant import parse_size_table
 from .locale import resolve as resolve_knowledge
 from .marker import write_marker_pdf
@@ -117,6 +118,7 @@ class TakeoffPipeline:
         unread: list[tuple[int, str]] = []
         frame_dropped = 0
         vec: list[TakeoffItem] = []
+        gunnamed: dict = {}
         if use_vector_text and any(p.text_lines for p in drawing.pages):
             frame = detect_frame(drawing)
             frame_dropped = len(frame)
@@ -125,6 +127,19 @@ class TakeoffPipeline:
                 "ベクター印字から %d 行（図枠として除外 %d 種 / 型に載らず %d 行）",
                 len(vec), frame_dropped, len(unread),
             )
+            # 記号（文字ラベルの無い部材）を図形として数える。凡例の見本と同じ形が
+            # 図の中に何個あるかを数えるだけなので、何度かけても同じ数になる。
+            try:
+                gitems, gunnamed = count_glyph_symbols(str(input_pdf), drawing, frame)
+                if gitems:
+                    logger.info(
+                        "凡例と一致する記号を %d 個数えました（%d 種）",
+                        sum(i.quantity for i in gitems), len(gitems),
+                    )
+                vec += gitems
+            except Exception as e:  # noqa: BLE001  記号が数えられなくても拾い出しは続ける
+                logger.warning("記号の計数に失敗: %s", e)
+                gunnamed = {}
             raw_items = list(raw_items) + vec
 
         # その会社が育てた別名を辞書に混ぜてから分類する。これを忘れると、
@@ -146,6 +161,31 @@ class TakeoffPipeline:
         # **分類前のベクター項目**を渡す。分類後を渡すと『配管の延長が要る』が黙って消える。
         has_text = any(p.text_lines for p in drawing.pages)
         gaps = find_gaps(drawing, vec) if has_text else []
+        # 図の中で繰り返し出てくるのに、凡例から名前が引けなかった記号。
+        # 勝手に名づけない。ページごとに並べると読む気を削ぐので、形ごとに1行へまとめる。
+        if gunnamed:
+            by_shape: dict[str, list] = {}
+            for pg, gl in gunnamed.items():
+                for g in gl:
+                    if g.count >= 4:
+                        by_shape.setdefault(g.key, []).append((pg, g))
+            ranked = sorted(
+                by_shape.values(), key=lambda v: -sum(g.count for _, g in v)
+            )[:8]
+            if ranked:
+                desc = "／".join(
+                    f"{sum(g.count for _, g in v)}個 "
+                    f"{v[0][1].width:.0f}×{v[0][1].height:.0f}pt" for v in ranked
+                )
+                pages_all = sorted({pg for v in ranked for pg, _ in v})
+                gaps.append(Gap(
+                    item="名前が引けない繰り返し記号",
+                    reason=f"図の中に同じ形が何度も出てきますが、凡例に一致する見本が"
+                           f"ありません（{desc}）。通り芯の丸や柱のような、拾い出しと"
+                           f"関係ない形も混じります",
+                    action="拾い出しの対象かどうか、図で見て判断してください",
+                    pages=pages_all,
+                ))
         refrig = parse_size_table(drawing) if has_text else []
         if refrig:
             logger.info("冷媒配管サイズ表を %d 行読みました（記号→口径の読み替え表）", len(refrig))
