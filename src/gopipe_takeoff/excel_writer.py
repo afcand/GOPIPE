@@ -67,6 +67,7 @@ def write_excel(
     gaps: list | None = None,
     unread: list[tuple[int, str]] | None = None,
     failures: list[str] | None = None,
+    refrigerant: list | None = None,
 ) -> Path:
     """拾い出し表を書く。
 
@@ -162,6 +163,24 @@ def write_excel(
     for row in ws3.iter_rows(min_row=2):
         for c in row:
             c.alignment = Alignment(wrap_text=True, vertical="top")
+
+    # 図面に刷られた冷媒配管サイズ表。数量ではなく「記号→口径」の読み替え表。
+    # 平面図の丸記号は図形で描かれていて機械では拾えないので、人がこれを見て拾う。
+    if refrigerant:
+        ws4 = wb.create_sheet("冷媒配管サイズ表")
+        ws4.append(["記号", "液管", "ガス管", "高低圧ガス管"])
+        for col_idx in range(1, 5):
+            c = ws4.cell(row=1, column=col_idx)
+            c.font = header_font
+            c.fill = header_fill
+            c.alignment = center
+        for r in refrigerant:
+            ws4.append([r.symbol, r.liquid, r.gas, r.high_low_gas or "—"])
+        ws4.append([])
+        ws4.append(["※ 図面に印刷された表です。平面図の冷媒ルートに振られた丸記号を、"
+                    "この表で口径に読み替えます。数量ではありません。"])
+        for col, w in zip("ABCD", [10, 12, 12, 14]):
+            ws4.column_dimensions[col].width = w
 
     widths = [5, 14, 22, 24, 14, 9, 7, 11, 9, 7, 24]  # 取付高さ・図面の色 を追加
     for i, w in enumerate(widths, start=1):

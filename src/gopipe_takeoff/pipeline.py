@@ -11,6 +11,7 @@ from .excel_writer import write_excel
 from .extractor import extract
 from .frame_filter import detect as detect_frame
 from .gap_report import find as find_gaps
+from .refrigerant import parse_size_table
 from .locale import resolve as resolve_knowledge
 from .marker import write_marker_pdf
 from .models import TakeoffItem
@@ -132,7 +133,11 @@ class TakeoffPipeline:
 
         # 🔴 分類(classify)は辞書でカテゴリを塗り替えるため、拾えていないものの判定には
         # **分類前のベクター項目**を渡す。分類後を渡すと『配管の延長が要る』が黙って消える。
-        gaps = find_gaps(drawing, vec) if any(p.text_lines for p in drawing.pages) else []
+        has_text = any(p.text_lines for p in drawing.pages)
+        gaps = find_gaps(drawing, vec) if has_text else []
+        refrig = parse_size_table(drawing) if has_text else []
+        if refrig:
+            logger.info("冷媒配管サイズ表を %d 行読みました（記号→口径の読み替え表）", len(refrig))
         if gaps:
             logger.info("拾えていないもの %d 件を申告します", len(gaps))
             for g in gaps:
@@ -140,7 +145,8 @@ class TakeoffPipeline:
 
         excel_path = out_dir / "拾い出し表.xlsx"
         logger.info("writing excel: %s", excel_path)
-        write_excel(items, excel_path, gaps=gaps, unread=unread, failures=failures)
+        write_excel(items, excel_path, gaps=gaps, unread=unread, failures=failures,
+                    refrigerant=refrig)
 
         marker_path: Path | None = None
         if input_pdf.exists() and any(it.bbox for it in items):
