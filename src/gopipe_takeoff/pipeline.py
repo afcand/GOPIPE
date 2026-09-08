@@ -9,10 +9,12 @@ from .classifier import classify
 from .dictionary import TakeoffDictionary
 from .excel_writer import write_excel
 from .extractor import extract
+from .frame_filter import detect as detect_frame
 from .locale import resolve as resolve_knowledge
 from .marker import write_marker_pdf
 from .models import TakeoffItem
 from .pdf_loader import load_pdf
+from .vector_takeoff import extract as extract_vector
 
 logger = get_logger("gopipe.track_a")
 
@@ -30,6 +32,11 @@ class TakeoffResult:
     # 読み取れなかったページ・タイル。0件と「読めていない」を混同させないため、
     # 空リストでない限り必ず画面まで運ぶ。
     failures: list[str] = field(default_factory=list)
+    # ベクター図の印字のうち、ラベルらしいのに型に載せられなかった行 (ページ, 原文)。
+    # これも「読めていない」の一種なので黙って捨てない。
+    unread_labels: list[tuple[int, str]] = field(default_factory=list)
+    # 図枠・凡例・参照表として除外した文字の種類数。除外しすぎ／しなさすぎの検知用。
+    frame_dropped: int = 0
 
 
 class TakeoffPipeline:
@@ -46,6 +53,7 @@ class TakeoffPipeline:
         grid: int = 1,
         two_pass: bool = False,
         use_text_table: bool = True,
+        use_vector_text: bool = True,
     ) -> TakeoffResult:
         """PDF → 拾い出し Excel + マーカー PDF を出力する。
 
@@ -71,10 +79,36 @@ class TakeoffPipeline:
 
         logger.info("extracting items via LLM (use_text_table=%s) ...", use_text_table)
         failures: list[str] = []
+        # 🔴 タイル分割を見送って実効解像度が落ちたページは「読めていない」。
+        # ログにだけ出しても誰も気づかない（実測2026-09-08: A1×23枚が実効47dpiで
+        # 送られていた）。結果に載せて必ず画面まで運ぶ。
+        for pg in drawing.pages:
+            if pg.low_res_dpi:
+                failures.append(
+                    f"ページ{pg.page}: 実効{pg.low_res_dpi:.0f}dpi でしか送れていません"
+                    f"（大判・多ページのため分割を見送り）。図面の表や小さい記号は"
+                    f"読めていない可能性が高いので、この画像由来の数量は信用しないでください。"
+                    f"分割したい場合は環境変数 GOPIPE_MAX_LLM_CALLS を上げて実行します。"
+                )
         raw_items = extract(
             drawing, two_pass=two_pass, use_text_table=use_text_table, failures=failures
         )
         logger.info("extracted=%d items (failures=%d)", len(raw_items), len(failures))
+
+        # ベクター(CAD)PDFなら、印字から推定ゼロで拾える分をここで足す。
+        # 実測(2026-09-08 NEC府中 A1 23枚): 印字だけで 1,627 箇所・カバー率99.8%。
+        # 画像認識の計数は同じ図面を2回かけると動くが、印字を数えるのは決定的。
+        unread: list[tuple[int, str]] = []
+        frame_dropped = 0
+        if use_vector_text and any(p.text_lines for p in drawing.pages):
+            frame = detect_frame(drawing)
+            frame_dropped = len(frame)
+            vec, unread = extract_vector(drawing, report=frame)
+            logger.info(
+                "ベクター印字から %d 行（図枠として除外 %d 種 / 型に載らず %d 行）",
+                len(vec), frame_dropped, len(unread),
+            )
+            raw_items = list(raw_items) + vec
 
         # その会社が育てた別名を辞書に混ぜてから分類する。これを忘れると、
         # 現場がいくら直しても次回の結果が変わらない（＝堀が効かない）。
@@ -108,6 +142,7 @@ class TakeoffPipeline:
         return TakeoffResult(
             items=items, excel_path=excel_path, marker_pdf_path=marker_path,
             failures=failures, llm_calls=llm_calls,
+            unread_labels=unread, frame_dropped=frame_dropped,
         )
 
 

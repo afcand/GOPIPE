@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from pathlib import Path
 
-from .models import Drawing, DrawingPage, Tile
+from .models import Drawing, DrawingPage, TextLine, Tile
 
 logger = logging.getLogger("gopipe.pdf_loader")
 
@@ -33,11 +34,48 @@ AUTO_TILE_MIN_DPI = 150
 # 1 リクエストあたりの LLM 呼び出し数の上限（サーバレスの実行時間 300 秒を守るため）。
 AUTO_TILE_MAX_CALLS = 9
 
+
+def max_llm_calls() -> int:
+    """1 リクエストで許す LLM 呼び出し数。
+
+    🔴 既定の 9 は **サーバレスの 300 秒**を守るための数であって、読める解像度の
+    ための数ではない。この予算をページ数で割るため、多ページの大判図では
+    1ページ1タイル＝丸ごと送りに落ちる。実測(2026-09-08 A1×23枚)では
+    **実効47dpi**まで落ちていた（2026-08-19 に表が読めなくなった 112dpi より更に低い）。
+    ローカル実行やバッチには 300 秒の縛りが無いので、環境変数で上げられるようにする。
+    """
+    try:
+        v = int(os.environ.get("GOPIPE_MAX_LLM_CALLS", "") or AUTO_TILE_MAX_CALLS)
+    except ValueError:
+        return AUTO_TILE_MAX_CALLS
+    return max(1, min(v, 400))
+
 # タイル同士の重なり（中心領域の外側に付ける「文脈用の余白」の割合）。
 # 0 だと境界にまたがる記号が両側で半分になり、どちらのタイルからも数え落とす。
 # 余白は見せるが数えさせない（下の _apply_core_focus で薄くし、プロンプトで
 # 「はっきり見えている中心部分だけを出す」と指示する）。二重計上を防ぐため。
 TILE_MARGIN = 0.08
+
+
+def text_lines_of(page) -> list[TextLine]:
+    """ページのテキスト層を、位置つきの行として取り出す（ベクターPDF向け）。
+
+    位置はページ幅・高さを 1 とした比率で持つ。紙のサイズ（A1/A3）や
+    レンダリング解像度が変わっても、同じ物差しで図枠を見分けられるようにするため。
+    """
+    out: list[TextLine] = []
+    try:
+        w, h = page.rect.width or 1.0, page.rect.height or 1.0
+        for block in page.get_text("dict").get("blocks", []):
+            for line in block.get("lines", []):
+                t = "".join(sp.get("text", "") for sp in line.get("spans", [])).strip()
+                if not t:
+                    continue
+                b = line.get("bbox") or (0, 0, 0, 0)
+                out.append(TextLine(text=t, x=b[0] / w, y=b[1] / h, x1=b[2] / w, y1=b[3] / h))
+    except Exception:  # noqa: BLE001  位置が取れなくても拾い出し自体は続ける
+        return []
+    return out
 
 
 def _encode(pix, *, jpeg: bool) -> bytes:
@@ -182,7 +220,7 @@ def auto_grid(used_dpi: int, *, tile_dpi: int = DEFAULT_TILE_DPI, page_count: in
     if used_dpi >= AUTO_TILE_MIN_DPI:
         return 1
     need = math.ceil(tile_dpi / max(used_dpi, 1))
-    budget = math.isqrt(max(AUTO_TILE_MAX_CALLS // max(page_count, 1), 1))
+    budget = math.isqrt(max(max_llm_calls() // max(page_count, 1), 1))
     return max(1, min(need, budget))
 
 
@@ -190,7 +228,7 @@ def plan_tiles(
     width_px: float,
     height_px: float,
     *,
-    max_calls: int = AUTO_TILE_MAX_CALLS,
+    max_calls: int | None = None,
     page_count: int = 1,
 ) -> tuple[int, int]:
     """紙の縦横比に沿って (行数, 列数) を決める。正方分割にしない。
@@ -202,6 +240,7 @@ def plan_tiles(
     （従来の 300dpi 正方タイルは 1655px あり、API 側で縮んでいた＝
     200dpi から 300dpi へ拡大した分が捨てられ、二重リサンプルでボケていた）。
     """
+    max_calls = max_llm_calls() if max_calls is None else max_calls
     cols = max(1, math.ceil(width_px / VISION_MAX_EDGE))
     rows = max(1, math.ceil(height_px / VISION_MAX_EDGE))
     budget = max(1, max_calls // max(page_count, 1))
@@ -300,6 +339,7 @@ def load_pdf(
         for i, page in enumerate(doc, start=1):
             text = page.get_text("text") or ""
             is_scan = len(text.strip()) < 50  # テキスト層が薄い=スキャン画像とみなす
+            tlines = [] if is_scan else text_lines_of(page)
             nat = native_dpi(page)
             # スキャンは JPEG。PNG だと byte 上限に当たって DPI が自動降格する。
             data, w, h, used_dpi = _render_within_limit(page, dpi=dpi, jpeg=is_scan)
@@ -313,6 +353,7 @@ def load_pdf(
                     logger.info("page %d: scan detected → image enhanced (contrast+sharpen)", i)
 
             tiles: list[Tile] = []
+            low_res: float | None = None
             rows = cols = grid
             # スキャンは原寸(native)に合わせる。原寸より上げても情報は増えず、
             # 拡大→API側で縮小 の二重リサンプルで字がぼやけるだけ。
@@ -337,6 +378,7 @@ def load_pdf(
                             "page %d: 実効%.0fdpi だがページ数が多く分割を見送り"
                             "（表の数量が読めない可能性が高い）", i, eff,
                         )
+                        low_res = eff
                 else:
                     rows = cols = 1
             if rows * cols > 1:
@@ -347,7 +389,7 @@ def load_pdf(
             pages.append(
                 DrawingPage(
                     page=i, width=w, height=h, text=text, image_png=data, tiles=tiles,
-                    image_raw=raw,
+                    image_raw=raw, text_lines=tlines, low_res_dpi=low_res,
                 )
             )
         doc.close()

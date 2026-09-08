@@ -46,6 +46,11 @@ def _note(it: TakeoffItem) -> str:
         parts.append("機器表から抽出")
     elif it.source == "legend_count":
         parts.append("凡例から記号カウント")
+    elif it.source == "vector_text":
+        # 印字を機械で数えたので数は動かない。ただし数えたのは「ラベル」であって
+        # 部材ではない（1本のダクトに2箇所ラベルがあれば2になる）。ここを
+        # 言い換えると嘘になるので、備考でそのまま伝える。
+        parts.append("図面の印字を機械で数えた（ラベル箇所数・部材数ではない）")
     if it.confidence < 0.7:
         parts.append(f"要確認(信頼度{it.confidence:.2f})")
     return " / ".join(parts)

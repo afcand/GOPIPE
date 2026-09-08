@@ -16,6 +16,22 @@ class BBox(BaseModel):
         return cls(x0=v[0], y0=v[1], x1=v[2], y1=v[3])
 
 
+class TextLine(BaseModel):
+    """ページのテキスト層の1行と、その位置（ページ幅・高さを1とした比率・左上原点）。
+
+    🔴位置を持たない「文字だけ」では、図枠の凡例・参照表と、図の中に描かれた
+    部材とを見分けられない。実測(2026-09-08 NEC府中の配管図8枚)では、図枠に
+    印刷された冷媒配管サイズ表の呼び径が 76件×8ページ=608件あり、文字だけを
+    数えると配管が608本あることになっていた。位置はそれを止めるために要る。
+    """
+
+    text: str
+    x: float   # 0..1
+    y: float
+    x1: float = 0.0
+    y1: float = 0.0
+
+
 class TakeoffItem(BaseModel):
     """1 つの拾い出し項目。"""
 
@@ -103,6 +119,9 @@ class DrawingPage(BaseModel):
     width: float  # px @ render dpi
     height: float
     text: str = ""
+    # テキスト層を「位置つき」で持ったもの。ベクター(CAD)PDFのときだけ埋まる。
+    # 図枠の見分け（frame_filter）と、印字からの拾い出し（vector_takeoff）が使う。
+    text_lines: list[TextLine] = []
     image_png: bytes | None = None  # 抽出に使うレンダリング画像 (フルページ)
     # 🔴前処理（自動コントラスト＋鮮鋭化）を掛ける前の原画。**色の実測はこちらで行う**。
     # 前処理は小さい字をAIに読ませるためのもので、彩度を削る。実測(2026-08-20 資料③):
@@ -112,6 +131,10 @@ class DrawingPage(BaseModel):
     # tiles が非空なら抽出は tile 単位で行う (split > 1 のとき)。
     # image_png はマーカー描画や fallback 用に残しておく。
     tiles: list[Tile] = []
+    # 🔴 タイル分割を見送った結果、モデルに届く実効解像度がこの値まで落ちたページ。
+    # None なら問題なし。値が入っていたら「読めていない可能性が高い」ということ。
+    # ログに出すだけでは誰も気づかないので、結果に載せて画面まで運ぶ。
+    low_res_dpi: float | None = None
 
 
 class Drawing(BaseModel):
