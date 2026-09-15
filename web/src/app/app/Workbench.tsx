@@ -8,6 +8,9 @@ import { supabaseBrowser } from "@/lib/supabase/client";
 
 type Phase = "" | "upload" | "run" | "learn" | "excel";
 
+/** 図面にあるのに、この経路では数えられなかったもの（記号もの・延長・冷媒 等）。 */
+type Gap = { item: string; reason: string; action: string; pages: number[] };
+
 export default function Workbench({
   orgSlug,
   orgName,
@@ -26,6 +29,13 @@ export default function Workbench({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [projectId, setProjectId] = useState<string | null>(null);
+  // ベクター(CAD)図は印字だけで拾える。画像認識を使わない＝費用0・何度やっても同じ数。
+  // 大判が何枚もあると1枚あたりの解像度が落ちるので、読めない画から出た数量が混ざる。
+  const [noLlm, setNoLlm] = useState(false);
+  // この図面にあるのに数えられなかったもの。表に出ない部材は現場から見れば0個に見える。
+  const [gaps, setGaps] = useState<Gap[]>([]);
+  const [unread, setUnread] = useState<{ page: number; text: string }[]>([]);
+  const [llmCalls, setLlmCalls] = useState<number | null>(null);
 
   const warnCount = useMemo(
     () => (rows ?? []).filter((r) => needsReview(r)).length,
@@ -128,6 +138,7 @@ export default function Workbench({
           projectSlug,
           title: title.trim(),
           fileName: file.name, // 画面に出すのは元の日本語のファイル名
+          noLlm,
         }),
       });
       const data = await res.json();
@@ -135,6 +146,10 @@ export default function Workbench({
 
       const items: TakeoffItem[] = data.items ?? [];
       setRows(sortForReview(items));
+      // 🔴 拾えていないものは、明細と同じ画面に出す。別画面へ送ると誰も見ない。
+      setGaps(Array.isArray(data?.gaps) ? data.gaps : []);
+      setUnread(Array.isArray(data?.unread_labels) ? data.unread_labels : []);
+      setLlmCalls(typeof data?.llm_calls === "number" ? data.llm_calls : null);
       const saved = data?.persisted?.error
         ? "（案件の保存には失敗しました）"
         : "物件として保存しました。あとから物件一覧で開き直せます。";
@@ -293,6 +308,9 @@ export default function Workbench({
             level_mm: r.level_mm ?? null,
             page: r.page ?? 1,
           })),
+          // 🔴 これを送らないと、Excel から「拾えていないもの」シートが消える。
+          gaps,
+          unread_labels: unread,
         }),
       });
       if (!res.ok) throw new Error("Excel の生成に失敗しました");
@@ -407,6 +425,24 @@ export default function Workbench({
           </button>
         </div>
 
+        {/* CAD から書き出したPDFは、図面の中の文字をそのまま読める。画像認識を通さない分、
+            費用が出ず、同じ図面なら毎回同じ数になる。スキャン・写真では文字が無いので効かない。 */}
+        <label className="mt-3 flex cursor-pointer items-start gap-2.5 text-[13.5px] text-[var(--mut)]">
+          <input
+            type="checkbox"
+            checked={noLlm}
+            onChange={(e) => setNoLlm(e.target.checked)}
+            disabled={busy}
+            className="mt-0.5 h-4 w-4 accent-[var(--cyan)]"
+          />
+          <span>
+            <b className="text-[var(--ink)]">画像認識を使わずに拾う（CADから書き出したPDF向け）</b>
+            <br />
+            図面に印字されている文字だけを数えます。AIの推測が入らないので、同じ図面なら毎回同じ数が出ます（料金もかかりません）。
+            スキャンした紙・写真では文字が無いため、こちらは外してください。
+          </span>
+        </label>
+
         <div className="mt-3">
           {/* 初めての人が、自分の図面を探さずにその場で試せるようにする。
               練習で会社の台帳を汚さないよう、物件名に「練習」を入れて使う運用。 */}
@@ -463,6 +499,40 @@ export default function Workbench({
           </p>
         )}
 
+        {rows && gaps.length > 0 && (
+          <section className="mt-6 rounded-[13px] border border-[rgba(255,171,51,0.45)] bg-[rgba(255,171,51,0.07)] px-5 py-4">
+            <p className="m-0 text-[15px] font-black text-[#ffab33]">
+              この図面から拾えていないもの（{gaps.length}件）
+            </p>
+            <p className="mt-1 mb-3 text-[13px] text-[var(--mut)]">
+              下の表に出てこない分です。「無い」のではなく「数えられなかった」ものなので、見積に入れる前にご確認ください。
+            </p>
+            <ul className="m-0 flex list-none flex-col gap-3 p-0">
+              {gaps.map((g, i) => (
+                <li key={i} className="border-t border-[var(--line)] pt-3 first:border-t-0 first:pt-0">
+                  <p className="m-0 text-[14px] font-bold text-[var(--ink)]">
+                    {g.item}
+                    {g.pages?.length > 0 && (
+                      <span className="ml-2 text-[12px] font-normal text-[var(--mut)]">
+                        {g.pages.length > 6
+                          ? `ページ ${g.pages.slice(0, 6).join("・")} ほか${g.pages.length - 6}枚`
+                          : `ページ ${g.pages.join("・")}`}
+                      </span>
+                    )}
+                  </p>
+                  <p className="m-0 mt-0.5 text-[13px] text-[var(--mut)]">{g.reason}</p>
+                  <p className="m-0 mt-0.5 text-[13px] text-[var(--cyan)]">→ {g.action}</p>
+                </li>
+              ))}
+            </ul>
+            {unread.length > 0 && (
+              <p className="mt-3 mb-0 text-[12.5px] text-[var(--mut)]">
+                このほか、図面の文字 {unread.length} 件は品目の型に当てはめられませんでした（Excel の別シートに全文を出します）。
+              </p>
+            )}
+          </section>
+        )}
+
         {rows && (
           <>
             <div className="mt-8">
@@ -471,6 +541,13 @@ export default function Workbench({
                   { label: "拾い出した明細", value: `${rows.length} 件`, color: "var(--ink)" },
                   { label: "要確認（🔴）", value: `${warnCount} 件`, color: "var(--red)" },
                   { label: "直した行", value: `${edited.length} 件`, color: "var(--cyan)" },
+                  ...(llmCalls === null
+                    ? []
+                    : [{
+                        label: "画像認識",
+                        value: llmCalls === 0 ? "使っていません" : `${llmCalls} 回`,
+                        color: llmCalls === 0 ? "var(--cyan)" : "var(--ink)",
+                      }]),
                 ]}
               />
             </div>

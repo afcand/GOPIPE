@@ -23,7 +23,7 @@ export async function POST(req: Request) {
     return Response.json({ error: "サーバの設定が未完了です" }, { status: 503 });
   }
 
-  const { storagePath, projectSlug, title, fileName } = await req.json();
+  const { storagePath, projectSlug, title, fileName, noLlm } = await req.json();
   if (typeof storagePath !== "string" || !storagePath.startsWith(`${me.org.slug}/`)) {
     return Response.json({ error: "図面の指定が不正です" }, { status: 400 });
   }
@@ -37,6 +37,8 @@ export async function POST(req: Request) {
   form.set("storage_path", storagePath);
   // 置き場所は半角英数だが、人が見る名前は元のまま残す
   if (fileName) form.set("file_name", String(fileName).slice(0, 200));
+  // ベクター(CAD)図は印字だけで拾える。画像認識を使わない＝費用0・同じ図面なら毎回同じ数。
+  if (noLlm) form.set("no_llm", "true");
 
   const res = await fetch(`${API_BASE}/takeoff`, {
     method: "POST",

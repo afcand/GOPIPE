@@ -161,6 +161,7 @@ def _takeoff(
     api_key: str | None = None,
     storage_path: str = "",
     org_slug: str = "",
+    no_llm: bool = False,
 ):
     p = (provider or "mock").strip().lower()
     if p not in _FREE_PROVIDERS:
@@ -172,7 +173,10 @@ def _takeoff(
     from gopipe_takeoff import run_takeoff
 
     pdf = _save_upload(file, storage_path)
-    return run_takeoff(str(pdf), str(OUT))
+    # no_llm: ベクター(CAD)PDFは印字だけで拾えるので、画像認識を一切使わない経路。
+    # 大判が何枚もあると1枚あたりのタイル予算が足りず実効解像度が落ち、読めない画から
+    # 出た数量が混ざる。使わない選択ができないと、費用0・決定的な拾い出しが現場に届かない。
+    return run_takeoff(str(pdf), str(OUT), use_llm=not no_llm)
 
 
 @app.get("/", include_in_schema=False)
@@ -215,14 +219,36 @@ async def takeoff(
     title: str = Form(""),
     storage_path: str = Form(""),
     file_name: str = Form(""),
+    # ベクター(CAD)図は印字だけで拾える。画像認識を使わない＝費用0・何度やっても同じ数。
+    no_llm: bool = Form(False),
     file: UploadFile | None = File(None),
     x_gopipe_key: str | None = Header(default=None),
 ):
-    result = _takeoff(provider, file, x_gopipe_key, storage_path, org_slug)
+    result = _takeoff(provider, file, x_gopipe_key, storage_path, org_slug, no_llm=no_llm)
     resp: dict = {"count": len(result.items), "items": _items_json(result.items)}
+    # 実際に走った画像認識の回数。0 なら費用は発生していない（画面で言い切る根拠）。
+    resp["llm_calls"] = getattr(result, "llm_calls", 0)
     # 読めなかったページは黙って落とさない。「0件」と「読めていない」は別物。
     if getattr(result, "failures", None):
         resp["warnings"] = result.failures
+    # 🔴 この図面にあるのに、この経路では数えられなかったもの（記号もの・延長・冷媒 等）。
+    # エンジンが申告しても API が落とすと、現場から見れば「0個」と区別がつかない。
+    gaps = getattr(result, "gaps", None) or []
+    if gaps:
+        resp["gaps"] = [
+            {"item": g.item, "reason": g.reason, "action": g.action,
+             "pages": list(getattr(g, "pages", []) or [])}
+            for g in gaps
+        ]
+    # 印字のうち、ラベルらしいのに型に載せられなかった行。これも「読めていない」の一種。
+    unread = getattr(result, "unread_labels", None) or []
+    if unread:
+        resp["unread_count"] = len(unread)
+        resp["unread_labels"] = [
+            {"page": int(pg), "text": str(tx)} for pg, tx in unread[:200]
+        ]
+    if getattr(result, "frame_dropped", 0):
+        resp["frame_dropped"] = result.frame_dropped
     if persist:
         # 書き込みは service_role（RLSバイパス）で走る。無認証で開けない。
         _require_key(x_gopipe_key, "persist=true")
@@ -657,8 +683,31 @@ async def export_xlsx(payload: dict = Body(...)):
     if not items:
         raise HTTPException(status_code=400, detail="items が空です")
 
+    # 🔴「拾えていないもの」を運ばないと、Web からの Excel だけ別シートが消える。
+    # 表に出ない部材は現場から見れば0個。無いのではなく数えられなかった、を紙に残す。
+    from gopipe_takeoff.gap_report import Gap
+
+    gaps = [
+        Gap(
+            item=str(g.get("item") or ""),
+            reason=str(g.get("reason") or ""),
+            action=str(g.get("action") or ""),
+            pages=[int(x) for x in (g.get("pages") or []) if str(x).strip().isdigit()],
+        )
+        for g in (payload.get("gaps") or [])
+        if str(g.get("item") or "").strip()
+    ]
+    unread = [
+        (int(u.get("page") or 1), str(u.get("text") or ""))
+        for u in (payload.get("unread_labels") or [])
+        if str(u.get("text") or "").strip()
+    ]
+
     OUT.mkdir(parents=True, exist_ok=True)
-    path = write_excel(items, OUT / "GOPIPE_拾い出し.xlsx")
+    path = write_excel(
+        items, OUT / "GOPIPE_拾い出し.xlsx",
+        gaps=gaps or None, unread=unread or None,
+    )
     data = Path(path).read_bytes()
     return Response(
         content=data,
