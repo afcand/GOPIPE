@@ -34,6 +34,7 @@ import re
 from dataclasses import dataclass
 
 from .models import TakeoffItem
+from .pdf_shapes import visible_drawings
 
 PT2MM = 25.4 / 72.0
 # 塗りが系統色の「白寄せ」かを判定する許容差（0..1 の色の距離）
@@ -118,7 +119,7 @@ def system_colors(page) -> list[SystemColor]:
 
     用途名のすぐ右にある色付きの線を、その用途の色として採る。
     """
-    drawings = [d for d in page.get_drawings() if d.get("color")]
+    drawings = [d for d in visible_drawings(page) if d.get("color")]
     out: list[SystemColor] = []
     seen: set[str] = set()
     for block in page.get_text("dict").get("blocks", []):
@@ -261,7 +262,7 @@ def duct_runs(page, *, scale: float, inside=None) -> list[DuctRun]:
     out: list[DuctRun] = []
     seen: set[tuple] = set()
     R = page.rect
-    for d in page.get_drawings():
+    for d in visible_drawings(page):
         fill = d.get("fill")
         if fill is None:
             continue

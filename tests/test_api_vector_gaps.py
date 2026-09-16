@@ -81,3 +81,64 @@ def test_export_gaps_reach_the_workbook():
     flat = ["".join(str(v) for v in r if v is not None) for r in rows[1:]]
     assert any("防火ダンパー" in t and "図面で数えてください" in t for t in flat)
     assert any("FD-1" in t for t in flat)
+
+
+# --- 指した範囲だけ拾う ------------------------------------------------------
+
+
+def test_takeoff_rejects_broken_region():
+    """範囲の指定が壊れていたら、黙って全体を拾わずに断る。
+
+    ここで黙って1枚まるごと拾うと、人は「範囲を指したつもり」なのに全体の数量が
+    返り、しかも見た目には気づけない。
+    """
+    res = client.post("/takeoff", data={"provider": "mock", "region": "{壊れた"})
+    assert res.status_code == 400
+
+
+def _pdf_bytes(pages: int = 2) -> bytes:
+    """検査用の小さな図面（範囲を指す口は、実物の紙が無いと確かめられない）。"""
+    import fitz
+
+    doc = fitz.open()
+    for i in range(pages):
+        pg = doc.new_page(width=800, height=600)
+        pg.insert_text((40, 60), f"TOPLEFT{i} FD-1")
+        pg.insert_text((600, 520), f"BOTRIGHT{i} VD-2")
+    return doc.tobytes()
+
+
+def test_takeoff_region_is_echoed_back():
+    """どの範囲から出た明細かを応答に載せる（複数の範囲を積み上げるため）。"""
+    res = client.post(
+        "/takeoff",
+        data={"provider": "mock", "region": '{"page":1,"x0":0.1,"y0":0.1,"x1":0.6,"y1":0.6}'},
+        files={"file": ("d.pdf", _pdf_bytes(), "application/pdf")},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body.get("region", {}).get("page") == 1
+    assert "範囲" in body["region"]["label"]
+
+
+def test_takeoff_refuses_a_region_without_a_drawing():
+    """図面が無いのに範囲だけ来たら、黙ってデモのサンプル全体を返さない。"""
+    res = client.post("/takeoff", data={
+        "provider": "mock", "region": '{"page":1,"x0":0,"y0":0,"x1":0.5,"y1":0.5}'})
+    assert res.status_code == 400
+
+
+def test_page_png_returns_an_image_and_page_count():
+    """画面に図面を出す口。ページ数も返さないと、2枚目以降へ行けない。"""
+    res = client.post("/page_png", data={"page": "1", "dpi": "60"},
+                      files={"file": ("d.pdf", _pdf_bytes(3), "application/pdf")})
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/png"
+    assert res.content[:8] == b"\x89PNG\r\n\x1a\n"
+    assert res.headers["x-page-count"] == "3"
+
+
+def test_page_png_refuses_a_page_that_does_not_exist():
+    res = client.post("/page_png", data={"page": "99"},
+                      files={"file": ("d.pdf", _pdf_bytes(), "application/pdf")})
+    assert res.status_code == 400

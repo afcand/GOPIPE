@@ -32,6 +32,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from .models import TakeoffItem
+from .pdf_shapes import visible_drawings
 
 # 図形の座標をこの単位に丸めて突き合わせる（pt）。CADの配置は正確なので細かくてよい。
 GRID = 0.5
@@ -405,7 +406,7 @@ def legend_cells(page, *, inside=None, is_frame=None) -> list[tuple[str, list]]:
     刷られるので必ず図枠側にある。これを渡さないと、断面図の中の「Y3」や「▼2FL」を
     凡例の名前と取り違えて、通り芯の丸を部材として数えはじめる（実測で起きた）。
     """
-    drs = [d for d in page.get_drawings() if _is_glyph(d)]
+    drs = [d for d in visible_drawings(page) if _is_glyph(d)]
     if not drs:
         return []
     out: list[tuple[str, list]] = []
@@ -444,7 +445,7 @@ def glyph_items(
     名前が引けないものを勝手に名づけない。数と大きさと場所だけを渡して人に見てもらう。
     実測では通り芯の丸や柱のような、拾い出しと関係ない形も繰り返し出てくる。
     """
-    drs = page.get_drawings()
+    drs = visible_drawings(page)
     if not drs:
         return [], []
     cells = legend_cells(page, inside=inside, is_frame=is_frame)

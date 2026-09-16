@@ -25,6 +25,8 @@ for _p in (ROOT / "src", ROOT / "shared"):
         sys.path.insert(0, str(_p))
 
 from gopipe_takeoff.locale import resolve as _kpath  # noqa: E402
+from gopipe_takeoff.region import Region as _Region  # noqa: E402
+from gopipe_takeoff.region import crop as _crop_region  # noqa: E402
 
 # Vercel 等サーバレスは /tmp 以外が読取専用。出力 xlsx は応答に含めない副産物なので
 # 書込可能な一時ディレクトリへ逃がす（run_takeoff が out_dir を mkdir する）。
@@ -162,6 +164,7 @@ def _takeoff(
     storage_path: str = "",
     org_slug: str = "",
     no_llm: bool = False,
+    region: dict | None = None,
 ):
     p = (provider or "mock").strip().lower()
     if p not in _FREE_PROVIDERS:
@@ -173,6 +176,21 @@ def _takeoff(
     from gopipe_takeoff import run_takeoff
 
     pdf = _save_upload(file, storage_path)
+    # 人が画面で囲んだ範囲だけを拾う。範囲だけのPDFを作って同じ経路へ流すので、
+    # 印字の抽出も記号の計数もダクトの実測もそのまま効く（専用の分岐を作らない）。
+    reg = _Region.from_dict(region)
+    if reg is not None and not reg.is_whole_page:
+        # 図面が無いのに範囲だけ来たら、黙って全体（mockのサンプル）を返さない。
+        # 「範囲を指したのに全体の数量が返る」は画面からは見分けがつかない。
+        if not Path(pdf).exists():
+            raise HTTPException(
+                status_code=400,
+                detail="範囲を指して拾うには図面が要ります（デモのサンプルには使えません）",
+            )
+        try:
+            pdf = _crop_region(pdf, reg)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
     # no_llm: ベクター(CAD)PDFは印字だけで拾えるので、画像認識を一切使わない経路。
     # 大判が何枚もあると1枚あたりのタイル予算が足りず実効解像度が落ち、読めない画から
     # 出た数量が混ざる。使わない選択ができないと、費用0・決定的な拾い出しが現場に届かない。
@@ -221,13 +239,31 @@ async def takeoff(
     file_name: str = Form(""),
     # ベクター(CAD)図は印字だけで拾える。画像認識を使わない＝費用0・何度やっても同じ数。
     no_llm: bool = Form(False),
+    # 人が画面で囲んだ範囲（紙の左上を0,0・右下を1,1とした比率のJSON）。
+    # 1枚を丸ごと読ませると、大判ほど実効解像度が落ち、断面図や別階が混ざる。
+    region: str = Form(""),
     file: UploadFile | None = File(None),
     x_gopipe_key: str | None = Header(default=None),
 ):
-    result = _takeoff(provider, file, x_gopipe_key, storage_path, org_slug, no_llm=no_llm)
+    reg_dict = None
+    if region.strip():
+        import json as _json
+
+        try:
+            reg_dict = _json.loads(region)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"range の形式が不正です: {e}") from e
+    result = _takeoff(provider, file, x_gopipe_key, storage_path, org_slug,
+                      no_llm=no_llm, region=reg_dict)
     resp: dict = {"count": len(result.items), "items": _items_json(result.items)}
     # 実際に走った画像認識の回数。0 なら費用は発生していない（画面で言い切る根拠）。
     resp["llm_calls"] = getattr(result, "llm_calls", 0)
+    _r = _Region.from_dict(reg_dict)
+    if _r is not None and not _r.is_whole_page:
+        # どの範囲から出た明細かを返す。複数の範囲を積み上げるとき、これが無いと
+        # 二重に拾った分を人が見分けられない。
+        resp["region"] = {"page": _r.page, "x0": _r.x0, "y0": _r.y0, "x1": _r.x1, "y1": _r.y1,
+                          "label": _r.label()}
     # 読めなかったページは黙って落とさない。「0件」と「読めていない」は別物。
     if getattr(result, "failures", None):
         resp["warnings"] = result.failures
@@ -268,6 +304,56 @@ async def takeoff(
         else:
             resp["persisted"] = {"error": "Supabase 未設定（SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY）"}
     return resp
+
+
+@app.post("/page_png")
+async def page_png(
+    storage_path: str = Form(""),
+    page: int = Form(1),
+    dpi: int = Form(110),
+    file: UploadFile | None = File(None),
+    x_gopipe_key: str | None = Header(default=None),
+):
+    """図面を画像にして返す（画面に出して、人が範囲を指すため）。
+
+    ブラウザでPDFを描く部品を入れると、図面の見え方がブラウザ任せになり、
+    人が囲んだ座標と実際の紙の位置がずれる。ここで紙を画像にしてしまえば、
+    画面に出ている絵と、範囲を切り出す元が、同じ1枚になる。
+    """
+    from fastapi.responses import Response
+
+    if storage_path:  # 他社の図面を引かせない
+        _require_key(x_gopipe_key, "Storage 上の図面の読み込み")
+    pdf = _save_upload(file, storage_path)
+    try:
+        import fitz
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"PDFを開けません: {e}") from e
+
+    if not Path(pdf).exists():
+        raise HTTPException(status_code=400, detail="図面を指定してください")
+    doc = fitz.open(pdf)
+    n = doc.page_count
+    if page < 1 or page > n:
+        doc.close()
+        raise HTTPException(status_code=400, detail=f"{n}ページの図面に {page}ページ目はありません")
+    pg = doc[page - 1]
+    # 画面に出すだけなので粗くてよい。大判を高dpiで描くと数十MBになり、
+    # 送る時間のほうが拾い出しより長くなる。
+    dpi = max(40, min(int(dpi or 110), 200))
+    pm = pg.get_pixmap(dpi=dpi)
+    data = pm.tobytes("png")
+    w_pt, h_pt = pg.rect.width, pg.rect.height
+    doc.close()
+    return Response(
+        content=data, media_type="image/png",
+        headers={
+            "x-page-count": str(n),
+            "x-page-width-pt": f"{w_pt:.1f}",
+            "x-page-height-pt": f"{h_pt:.1f}",
+            "cache-control": "no-store",
+        },
+    )
 
 
 @app.post("/estimate")

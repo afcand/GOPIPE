@@ -23,7 +23,7 @@ export async function POST(req: Request) {
     return Response.json({ error: "サーバの設定が未完了です" }, { status: 503 });
   }
 
-  const { storagePath, projectSlug, title, fileName, noLlm } = await req.json();
+  const { storagePath, projectSlug, title, fileName, noLlm, region } = await req.json();
   if (typeof storagePath !== "string" || !storagePath.startsWith(`${me.org.slug}/`)) {
     return Response.json({ error: "図面の指定が不正です" }, { status: 400 });
   }
@@ -39,6 +39,9 @@ export async function POST(req: Request) {
   if (fileName) form.set("file_name", String(fileName).slice(0, 200));
   // ベクター(CAD)図は印字だけで拾える。画像認識を使わない＝費用0・同じ図面なら毎回同じ数。
   if (noLlm) form.set("no_llm", "true");
+  // 人が画面で囲んだ範囲。1枚を丸ごと読ませると、大判ほど実効解像度が落ち、
+  // 断面図や別階が混ざり、割り方で数量が変わる（実測済み）。
+  if (region && typeof region === "object") form.set("region", JSON.stringify(region));
 
   const res = await fetch(`${API_BASE}/takeoff`, {
     method: "POST",

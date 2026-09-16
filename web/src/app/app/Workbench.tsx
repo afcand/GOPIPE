@@ -352,6 +352,10 @@ export default function Workbench({
         </div>
         <div className="text-right text-[12.5px] text-[var(--mut)]">
           <p className="m-0">
+            <a href="/app/pick" className="font-bold text-[var(--cyan)] hover:underline">
+              指して拾う
+            </a>
+            <span className="mx-2 opacity-40">|</span>
             <a href="/app/measure" className="font-bold text-[var(--cyan)] hover:underline">
               現地実測
             </a>
