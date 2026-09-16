@@ -247,3 +247,44 @@ def test_page_png_carries_the_sheet_key():
                       files={"file": ("d.pdf", _pdf_bytes(), "application/pdf")})
     assert res.status_code == 200
     assert "x-sheet-key" in res.headers
+
+
+# --- 0件のときに理由を言う ---------------------------------------------------
+
+
+def _scan_pdf_bytes() -> bytes:
+    """文字層の無い紙（スキャンに相当）。"""
+    import fitz
+
+    doc = fitz.open()
+    pg = doc.new_page(width=400, height=400)
+    pg.draw_rect(fitz.Rect(40, 40, 360, 360), color=(0, 0, 0))
+    return doc.tobytes()
+
+
+def test_empty_result_says_the_paper_has_no_text():
+    """🔴 紙のスキャンに『画像認識を使わない』で当てると必ず0件になる。
+
+    画面には「この範囲だと拾えませんでした」としか出ず、図面が悪いのか指した場所が
+    悪いのか読ませ方が悪いのかが分からなかった。理由を返す。
+    """
+    res = client.post(
+        "/takeoff",
+        data={"provider": "mock", "no_llm": "true"},
+        files={"file": ("scan.pdf", _scan_pdf_bytes(), "application/pdf")},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["count"] == 0
+    assert "文字が入っていません" in body.get("reason", "")
+    assert "画像認識" in body["reason"], "どう直せばよいかまで言う"
+
+
+def test_page_png_tells_whether_the_paper_has_text():
+    """画面が「この紙はスキャンだ」と分かること（開いた時点で設定を倒すため）。"""
+    scan = client.post("/page_png", data={"page": "1", "dpi": "60"},
+                       files={"file": ("s.pdf", _scan_pdf_bytes(), "application/pdf")})
+    assert scan.headers["x-has-text"] == "0"
+    cad = client.post("/page_png", data={"page": "1", "dpi": "60"},
+                      files={"file": ("c.pdf", _pdf_bytes(), "application/pdf")})
+    assert cad.headers["x-has-text"] == "0" or cad.headers["x-has-text"] == "1"

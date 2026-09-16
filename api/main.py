@@ -160,6 +160,36 @@ def _dictionary_for(org_slug: str = ""):
 _SHEET_KEY_CACHE: dict[str, str] = {}
 
 
+def _why_empty(pdf: Path, *, no_llm: bool) -> str:
+    """1件も拾えなかったとき、その理由を人の言葉で返す。
+
+    「この範囲だと拾えませんでした」だけでは、図面が悪いのか、指した場所が悪いのか、
+    読ませ方が悪いのかが分からない。実際に多いのは**紙のスキャンなのに
+    「画像認識を使わない」が入っている**ケースで、これは画面からは見分けがつかない。
+    """
+    try:
+        import fitz
+
+        doc = fitz.open(pdf)
+        page = doc[0]
+        text = (page.get_text("text") or "").strip()
+        shapes = len(page.get_drawings())
+        doc.close()
+    except Exception:  # noqa: BLE001
+        return "この範囲からは拾えませんでした"
+
+    if not text and no_llm:
+        return ("この図面には文字が入っていません（紙をスキャンした図面です）。"
+                "「画像認識を使わない」のチェックを外すと読めます（この場合は料金がかかります）")
+    if not text and not shapes:
+        return "この範囲には図も文字もありません。図が描かれているところを囲んでください"
+    if not text:
+        return ("この範囲に図はありますが、文字が入っていません。"
+                "画像認識を使うか、呼び径などの印字がある範囲まで広げてください")
+    return (f"この範囲に文字は{len(text.splitlines())}行ありましたが、"
+            "拾い出しの型（呼び径・器具名・員数など）に当てはまるものがありませんでした")
+
+
 def _sheet_key_for(pdf: Path) -> str:
     """図面の型の鍵。同じ様式の紙なら同じ鍵になり、覚えた指示を引ける。
 
@@ -196,6 +226,7 @@ def _takeoff(
     org_slug: str = "",
     no_llm: bool = False,
     region: dict | None = None,
+    info: dict | None = None,
 ):
     p = (provider or "mock").strip().lower()
     if p not in _FREE_PROVIDERS:
@@ -225,6 +256,9 @@ def _takeoff(
     # no_llm: ベクター(CAD)PDFは印字だけで拾えるので、画像認識を一切使わない経路。
     # 大判が何枚もあると1枚あたりのタイル予算が足りず実効解像度が落ち、読めない画から
     # 出た数量が混ざる。使わない選択ができないと、費用0・決定的な拾い出しが現場に届かない。
+    if info is not None:
+        # 0件だったときに「なぜ拾えなかったか」を調べるため、実際に読んだ紙を返す
+        info["pdf"] = str(pdf)
     return run_takeoff(str(pdf), str(OUT), use_llm=not no_llm)
 
 
@@ -284,11 +318,14 @@ async def takeoff(
             reg_dict = _json.loads(region)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"range の形式が不正です: {e}") from e
+    used: dict = {}
     result = _takeoff(provider, file, x_gopipe_key, storage_path, org_slug,
-                      no_llm=no_llm, region=reg_dict)
+                      no_llm=no_llm, region=reg_dict, info=used)
     resp: dict = {"count": len(result.items), "items": _items_json(result.items)}
     # 実際に走った画像認識の回数。0 なら費用は発生していない（画面で言い切る根拠）。
     resp["llm_calls"] = getattr(result, "llm_calls", 0)
+    if not result.items and used.get("pdf"):
+        resp["reason"] = _why_empty(Path(used["pdf"]), no_llm=no_llm)
     _r = _Region.from_dict(reg_dict)
     if _r is not None and not _r.is_whole_page:
         # どの範囲から出た明細かを返す。複数の範囲を積み上げるとき、これが無いと
@@ -380,6 +417,9 @@ async def page_png(
     dpi = max(40, min(int(dpi or 110), 200))
     pm = pg.get_pixmap(dpi=dpi)
     data = pm.tobytes("png")
+    # 文字層の有無。これを画面に渡さないと、紙のスキャンなのに
+    # 「画像認識を使わない」のまま実行して0件になる（実際にそうなった）。
+    has_text = len((pg.get_text("text") or "").strip()) > 20
     w_pt, h_pt = pg.rect.width, pg.rect.height
     doc.close()
     return Response(
@@ -387,6 +427,7 @@ async def page_png(
         headers={
             "x-page-count": str(n),
             "x-sheet-key": _sheet_key_for(Path(pdf)),
+            "x-has-text": "1" if has_text else "0",
             "x-page-width-pt": f"{w_pt:.1f}",
             "x-page-height-pt": f"{h_pt:.1f}",
             "cache-control": "no-store",

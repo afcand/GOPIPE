@@ -580,12 +580,21 @@ export default function Workbench({
 
             <div className="mt-6 flex flex-wrap items-center gap-3">
               {projectId && (
-                <a
-                  href={`/app/projects/${projectId}`}
-                  className="rounded-[11px] border border-[var(--line)] px-5 py-3 text-[15px] font-bold text-[var(--ink)] hover:border-[var(--cyan)]"
-                >
-                  この物件を開く（続きから直せます）
-                </a>
+                <>
+                  <a
+                    href={`/app/projects/${projectId}`}
+                    className="rounded-[11px] border border-[var(--line)] px-5 py-3 text-[15px] font-bold text-[var(--ink)] hover:border-[var(--cyan)]"
+                  >
+                    この物件を開く（続きから直せます）
+                  </a>
+                  {/* 拾い切れなかったところを、その場で範囲・色・記号で足しに行く */}
+                  <a
+                    href={`/app/pick?project=${projectId}`}
+                    className="rounded-[11px] border border-[var(--orange)] px-5 py-3 text-[15px] font-bold text-[var(--orange)] hover:bg-[rgba(255,171,51,0.08)]"
+                  >
+                    図面を見て拾い足す
+                  </a>
+                </>
               )}
               <button
                 onClick={learn}

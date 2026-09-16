@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabase/client";
 import type { TakeoffItem } from "@/lib/gopipe";
 
@@ -40,11 +40,23 @@ type Pick = {
   items: TakeoffItem[];
   gaps: Gap[];
   llmCalls: number;
+  /** 0件だったときの理由（図面が悪いのか、指す場所か、読ませ方かを言い分ける） */
+  reason?: string;
 };
 
-export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName: string }) {
+export default function Picker({
+  orgSlug,
+  orgName,
+  project,
+}: {
+  orgSlug: string;
+  orgName: string;
+  /** 物件を指定して開いたとき。図面はそのまま開き、拾った行はこの物件へ足す。 */
+  project?: { id: string; title: string; storagePath: string; fileName: string } | null;
+}) {
   const [file, setFile] = useState<File | null>(null);
-  const [path, setPath] = useState<string>("");
+  const [path, setPath] = useState<string>(project?.storagePath ?? "");
+  const [added, setAdded] = useState(0);
   const [img, setImg] = useState<string>("");
   const [page, setPage] = useState(1);
   const [pageCount, setPageCount] = useState(1);
@@ -57,10 +69,17 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
   const [points, setPoints] = useState<Point[]>([]);
   const [meaning, setMeaning] = useState<Record<string, string>>({});
   const [sheetKey, setSheetKey] = useState("");
+  const [pageHasText, setPageHasText] = useState(true);
   const [saved, setSaved] = useState<Saved[]>([]);
   // 色をどう拾うか（名前・単位・数える/長さ/拾わない）。名前だけでは数量にならない。
   const [rule, setRule] = useState<Record<string, { name: string; action: string; unit: string }>>({});
   const boxRef = useRef<HTMLDivElement>(null);
+
+  // 物件を指定して来たら、アップロードを挟まずそのまま図面を開く
+  useEffect(() => {
+    if (project?.storagePath) loadPage(project.storagePath, 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.storagePath]);
 
   const busyLabel =
     busy === "upload" ? "図面を送っています…" : busy === "page" ? "図面を開いています…" : "この範囲を拾っています…";
@@ -89,6 +108,11 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
       const sk = res.headers.get("x-sheet-key") ?? "";
       setSheetKey(sk);
       loadSaved(sk);
+      // 🔴 紙のスキャンには文字が無い。「画像認識を使わない」のままだと必ず0件になり、
+      // 画面からは理由が分からない（実際にそうなった）。開いた時点で倒しておく。
+      const hasText = (res.headers.get("x-has-text") ?? "1") === "1";
+      setPageHasText(hasText);
+      if (!hasText) setNoLlm(false);
       const blob = await res.blob();
       setImg((old) => {
         if (old) URL.revokeObjectURL(old);
@@ -187,16 +211,20 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? "拾い出しに失敗しました");
+      const gotItems: TakeoffItem[] = data.items ?? [];
+      const regionLabel: string = data?.region?.label ?? `p${page}`;
+      addToProject(gotItems, regionLabel);
       setPicks((cur) => [
         ...cur,
         {
           id: Date.now(),
-          label: data?.region?.label ?? `p${page}`,
+          label: regionLabel,
           page,
           box,
           items: data.items ?? [],
           gaps: Array.isArray(data.gaps) ? data.gaps : [],
           llmCalls: typeof data.llm_calls === "number" ? data.llm_calls : 0,
+          reason: typeof data.reason === "string" ? data.reason : "",
         },
       ]);
       setDrag(null);
@@ -220,6 +248,8 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? "指した場所を拾えませんでした");
+      const picked: TakeoffItem[] = data.items ?? [];
+      addToProject(picked, `p${page} 指した点`);
       setPoints((cur) => [
         ...cur,
         {
@@ -233,6 +263,37 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
     } finally {
       setBusy("");
     }
+  }
+
+  /** 拾った行を、その物件の明細に足す（1回まるごと拾ったものの続きになる）。 */
+  async function addToProject(items: TakeoffItem[], where: string) {
+    if (!project?.id || items.length === 0) return;
+    let ok = 0;
+    for (const it of items) {
+      try {
+        const res = await fetch("/api/items/rows", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            projectId: project.id,
+            item: {
+              name: it.name,
+              spec: it.spec ?? null,
+              quantity: it.quantity,
+              unit: it.unit,
+              // どこを指して出た行かを残す。あとから二重を見分ける手がかりになる。
+              location: it.location ? `${it.location}／${where}` : where,
+              category: it.category ?? null,
+            },
+          }),
+        });
+        if (res.ok) ok += 1;
+      } catch {
+        /* 1行ずつなので、失敗した行だけが落ちる */
+      }
+    }
+    if (ok) setAdded((n) => n + ok);
+    if (ok < items.length) setError(`${items.length - ok} 行は物件に足せませんでした`);
   }
 
   /** 色の意味を会社の辞書へ覚えさせる。意味を当てるのは人。 */
@@ -292,15 +353,35 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] py-6">
         <div>
           <p className="m-0 text-[12px] font-bold tracking-[0.3em] text-[var(--cyan)]">GOPIPE</p>
-          <p className="m-0 text-[20px] font-black">指して拾う — {orgName}</p>
+          <p className="m-0 text-[20px] font-black">
+            {project ? `指して拾い足す — ${project.title || project.fileName}` : `指して拾う — ${orgName}`}
+          </p>
         </div>
-        <a href="/app" className="text-[13px] font-bold text-[var(--cyan)] hover:underline">
-          ← 1枚まるごとの拾い出しへ
-        </a>
+        <div className="text-right text-[12.5px]">
+          {project && (
+            <a
+              href={`/app/projects/${project.id}`}
+              className="mr-3 font-bold text-[var(--cyan)] hover:underline"
+            >
+              物件の明細へ戻る
+            </a>
+          )}
+          <a href="/app" className="font-bold text-[var(--cyan)] hover:underline">
+            1枚まるごとの拾い出しへ
+          </a>
+          {added > 0 && (
+            <span className="ml-3 rounded bg-[rgba(31,157,85,0.18)] px-2 py-1 font-bold text-[#3ddc84]">
+              この物件に {added} 行 足しました
+            </span>
+          )}
+        </div>
       </header>
 
       <section className="py-6">
         <p className="mt-0 mb-5 text-[14px] text-[var(--mut)]">
+          {project
+            ? "1回まるごと拾ったあとの、拾い足しです。囲んだ範囲・指した色や物から出た行は、この物件の明細にそのまま足されます。"
+            : ""}
           図面を開いて、拾いたいところを<b className="text-[var(--ink)]">囲んで</b>ください。囲んだ範囲だけを拾います。
           1枚を丸ごと読ませると、大判ほど字が潰れ、断面図や別の階が混ざります。範囲を指すと、その両方が消えます。
         </p>
@@ -312,6 +393,9 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
         </p>
 
         <div className="flex flex-wrap items-center gap-3 rounded-[13px] border border-[var(--line)] bg-[var(--panel)] p-4">
+          {project ? (
+            <span className="text-[14px] font-bold">📄 {project.fileName || "この物件の図面"}</span>
+          ) : (
           <label className="cursor-pointer rounded-[10px] border border-dashed border-[var(--cyan)] px-4 py-2 text-[14px] font-bold whitespace-nowrap text-[var(--cyan)] hover:bg-[rgba(86,204,242,0.08)]">
             {file ? `📄 ${file.name}` : "図面を選ぶ"}
             <input
@@ -321,13 +405,16 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
               className="hidden"
             />
           </label>
-          <button
-            onClick={upload}
-            disabled={!file || busy !== ""}
-            className="rounded-[10px] bg-[var(--cyan)] px-5 py-2 text-[14px] font-black text-[#04121f] disabled:opacity-40"
-          >
-            開く
-          </button>
+          )}
+          {!project && (
+            <button
+              onClick={upload}
+              disabled={!file || busy !== ""}
+              className="rounded-[10px] bg-[var(--cyan)] px-5 py-2 text-[14px] font-black text-[#04121f] disabled:opacity-40"
+            >
+              開く
+            </button>
+          )}
           {pageCount > 1 && img && (
             <span className="flex items-center gap-2 text-[13px]">
               <button
@@ -356,6 +443,12 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
             />
             画像認識を使わない（CADのPDF・費用0）
           </label>
+          {!pageHasText && (
+            <p className="m-0 basis-full text-[12.5px] text-[#ffab33]">
+              この図面には文字が入っていません（紙をスキャンした図面です）。印字だけでは拾えないので、
+              画像認識を使う設定にしました。料金がかかります。
+            </p>
+          )}
         </div>
 
         {/* 道具。範囲は「囲む」、ほかは「1回クリックする」。 */}
@@ -627,8 +720,8 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
               {p.llmCalls === 0 && <span className="ml-2 text-[12px] font-bold text-[var(--cyan)]">画像認識なし</span>}
             </p>
             {p.items.length === 0 ? (
-              <p className="m-0 text-[13px] text-[var(--mut)]">
-                この範囲からは拾えませんでした。印字が無い範囲か、画像認識を使う必要があります。
+              <p className="m-0 text-[13px] text-[#ffab33]">
+                {p.reason || "この範囲からは拾えませんでした"}
               </p>
             ) : (
               <div className="overflow-x-auto">

@@ -51,12 +51,24 @@ export default async function ProjectDetail({
             {project.title?.trim() || project.slug}
           </p>
         </div>
-        <Link
-          href="/app"
-          className="rounded-[11px] border border-[var(--cyan)] px-5 py-2.5 text-[14px] font-bold text-[var(--cyan)]"
-        >
-          この物件に図面を追加
-        </Link>
+        <div className="flex flex-wrap gap-2">
+          {/* 1回まるごと拾ったあと、足りないところを範囲と色で拾い足す入口。
+              ここが無いと、図面を開き直して別画面で拾うことになり、明細が繋がらない。 */}
+          {(drawings?.length ?? 0) > 0 && (
+            <Link
+              href={`/app/pick?project=${project.id}`}
+              className="rounded-[11px] bg-gradient-to-b from-[#ffab33] to-[var(--orange)] px-5 py-2.5 text-[14px] font-black text-[#241200]"
+            >
+              図面を見て拾い足す（範囲・色・記号）
+            </Link>
+          )}
+          <Link
+            href="/app"
+            className="rounded-[11px] border border-[var(--cyan)] px-5 py-2.5 text-[14px] font-bold text-[var(--cyan)]"
+          >
+            この物件に図面を追加
+          </Link>
+        </div>
       </header>
 
       {(drawings?.length ?? 0) > 0 && (
