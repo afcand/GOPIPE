@@ -13,6 +13,18 @@ import type { TakeoffItem } from "@/lib/gopipe";
  */
 
 type Gap = { item: string; reason: string; action: string; pages: number[] };
+type Tool = "range" | "color" | "duct" | "symbol";
+/** 指した1点の結果。色・ダクト・記号で中身が変わる。 */
+type Point = {
+  id: number;
+  tool: Tool;
+  page: number;
+  at: { x: number; y: number };
+  label: string;
+  note: string;
+  detail: Record<string, unknown>;
+  items: TakeoffItem[];
+};
 type Pick = {
   id: number;
   label: string;
@@ -34,6 +46,9 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
   const [noLlm, setNoLlm] = useState(true);
   const [picks, setPicks] = useState<Pick[]>([]);
   const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const [tool, setTool] = useState<Tool>("range");
+  const [points, setPoints] = useState<Point[]>([]);
+  const [meaning, setMeaning] = useState<Record<string, string>>({});
   const boxRef = useRef<HTMLDivElement>(null);
 
   const busyLabel =
@@ -147,7 +162,55 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
     }
   }
 
-  const allItems = picks.flatMap((p) => p.items);
+  /** 図面の1点を指す（色・ダクト・記号）。囲まずにクリックするだけ。 */
+  async function pickPoint(at: { x: number; y: number }) {
+    if (!path || tool === "range") return;
+    setBusy("run");
+    setError("");
+    try {
+      const res = await fetch("/api/pick", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ storagePath: path, page, mode: tool, x: at.x, y: at.y }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? "指した場所を拾えませんでした");
+      setPoints((cur) => [
+        ...cur,
+        {
+          id: Date.now(), tool, page, at,
+          label: data.label ?? "", note: data.note ?? "",
+          detail: data.detail ?? {}, items: data.items ?? [],
+        },
+      ]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  /** 色の意味を会社の辞書へ覚えさせる。意味を当てるのは人。 */
+  async function rememberColor(hex: string) {
+    const m = (meaning[hex] ?? "").trim();
+    if (!m) return;
+    try {
+      const res = await fetch("/api/color-meanings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ color: hex, meaning: m }),
+      });
+      if (!res.ok) throw new Error("覚えられませんでした");
+      setMeaning((cur) => ({ ...cur, [hex]: "" }));
+      setPoints((cur) =>
+        cur.map((p) => (p.detail?.hex === hex ? { ...p, note: `${m} として覚えました` } : p)),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  const allItems = [...picks.flatMap((p) => p.items), ...points.flatMap((p) => p.items)];
   const allGaps = picks.flatMap((p) => p.gaps);
   const calls = picks.reduce((n, p) => n + p.llmCalls, 0);
 
@@ -250,6 +313,30 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
           </label>
         </div>
 
+        {/* 道具。範囲は「囲む」、ほかは「1回クリックする」。 */}
+        <div className="mt-3 flex flex-wrap gap-2">
+          {([
+            ["range", "範囲を囲む", "囲んだ中だけを拾う"],
+            ["color", "色を指す", "同じ色のものを集める"],
+            ["duct", "ダクトを指す", "その1本の延長と幅を測る"],
+            ["symbol", "記号を指す", "同じ形が何個あるか数える"],
+          ] as [Tool, string, string][]).map(([t, name, hint]) => (
+            <button
+              key={t}
+              onClick={() => { setTool(t); setDrag(null); }}
+              className={
+                "rounded-[10px] border px-4 py-2 text-left text-[13px] " +
+                (tool === t
+                  ? "border-[var(--cyan)] bg-[rgba(86,204,242,0.10)] text-[var(--ink)]"
+                  : "border-[var(--line)] text-[var(--mut)] hover:border-[var(--cyan)]")
+              }
+            >
+              <span className="block font-black">{name}</span>
+              <span className="block text-[11.5px] opacity-80">{hint}</span>
+            </button>
+          ))}
+        </div>
+
         {error && (
           <p className="mt-4 rounded-[11px] border border-[rgba(215,38,30,0.35)] bg-[rgba(215,38,30,0.08)] px-4 py-3 text-[14px] text-[#f2c7c4]">
             {error}
@@ -263,14 +350,19 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
               ref={boxRef}
               className="relative w-full cursor-crosshair select-none overflow-hidden rounded-[10px] border border-[var(--line)] bg-white"
               onMouseDown={(e) => {
+                if (tool !== "range") return;      // 点を指す道具では囲まない
                 const p = rel(e);
                 setDrag({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });
               }}
               onMouseMove={(e) => {
-                if (!drag) return;
+                if (tool !== "range" || !drag) return;
                 if (e.buttons !== 1) return;
                 const p = rel(e);
                 setDrag((d) => (d ? { ...d, x1: p.x, y1: p.y } : d));
+              }}
+              onClick={(e) => {
+                if (tool === "range" || busy) return;
+                pickPoint(rel(e));
               }}
             >
               {/* 図面は画像で出す。ブラウザにPDFを描かせると、見えている絵と
@@ -293,6 +385,15 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
                     </span>
                   </div>
                 ))}
+              {points
+                .filter((p) => p.page === page)
+                .map((p) => (
+                  <span
+                    key={p.id}
+                    className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#7b3fe4] bg-[rgba(123,63,228,0.18)]"
+                    style={{ left: `${p.at.x * 100}%`, top: `${p.at.y * 100}%`, width: 16, height: 16 }}
+                  />
+                ))}
               {drag && (
                 <div
                   className="pointer-events-none absolute border-2 border-dashed border-[var(--orange)] bg-[rgba(255,171,51,0.12)]"
@@ -307,9 +408,15 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
             </div>
 
             <div className="mt-3 flex flex-wrap items-center gap-3">
+              {tool !== "range" && (
+                <span className="text-[13.5px] font-bold text-[#a06bff]">
+                  図面の{tool === "color" ? "線" : tool === "duct" ? "ダクトの帯の内側" : "記号"}を
+                  クリックしてください
+                </span>
+              )}
               <button
                 onClick={runRegion}
-                disabled={!drag || busy !== ""}
+                disabled={!drag || busy !== "" || tool !== "range"}
                 className="rounded-[11px] bg-gradient-to-b from-[#ffab33] to-[var(--orange)] px-6 py-3 text-[15px] font-black text-[#241200] disabled:opacity-40"
               >
                 この範囲を拾う
@@ -333,6 +440,55 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
               )}
             </div>
           </div>
+        )}
+
+        {points.length > 0 && (
+          <section className="mt-6 rounded-[12px] border border-[#7b3fe4] bg-[rgba(123,63,228,0.06)] p-4">
+            <p className="m-0 mb-3 text-[14px] font-black text-[#a06bff]">
+              指して拾ったもの（{points.length} 件）
+            </p>
+            <ul className="m-0 flex list-none flex-col gap-3 p-0">
+              {points.map((p) => {
+                const hex = typeof p.detail?.hex === "string" ? p.detail.hex : "";
+                return (
+                  <li key={p.id} className="border-t border-[var(--line)] pt-3 first:border-t-0 first:pt-0">
+                    <p className="m-0 text-[14px]">
+                      <span className="mr-2 rounded bg-[rgba(123,63,228,0.18)] px-2 py-0.5 text-[11.5px] font-bold text-[#a06bff]">
+                        {p.tool === "color" ? "色" : p.tool === "duct" ? "ダクト" : "記号"}
+                      </span>
+                      {hex && (
+                        <span
+                          className="mr-2 inline-block h-3 w-3 rounded-sm border border-[var(--line)] align-middle"
+                          style={{ background: hex }}
+                        />
+                      )}
+                      <b>{p.label || "—"}</b>
+                      <span className="ml-2 text-[12.5px] text-[var(--mut)]">p{p.page}</span>
+                    </p>
+                    {p.note && <p className="m-0 mt-0.5 text-[12.5px] text-[var(--mut)]">{p.note}</p>}
+                    {p.tool === "color" && hex && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        {/* 色の意味は会社ごと図面ごとにしか決まらない。当てずに聞く。 */}
+                        <input
+                          value={meaning[hex] ?? ""}
+                          onChange={(e) => setMeaning((c) => ({ ...c, [hex]: e.target.value }))}
+                          placeholder="この色は何ですか（例: 還気ダクト・既存流用）"
+                          className="min-w-0 flex-1 rounded-[8px] border border-[var(--line)] bg-[var(--navy2)] px-3 py-1.5 text-[13px] focus:border-[var(--cyan)] focus:outline-none"
+                        />
+                        <button
+                          onClick={() => rememberColor(hex)}
+                          disabled={!(meaning[hex] ?? "").trim()}
+                          className="rounded-[8px] border border-[var(--cyan)] px-3 py-1.5 text-[12.5px] font-bold text-[var(--cyan)] disabled:opacity-40"
+                        >
+                          覚えさせる
+                        </button>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
         )}
 
         {picks.map((p) => (

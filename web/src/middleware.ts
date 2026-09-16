@@ -35,10 +35,12 @@ export const config = {
     "/login",
     "/api/run",
     "/api/page",
+    "/api/pick",
     "/api/learn",
     "/api/items",
     "/api/items/rows",
     "/api/dictionary",
+    "/api/color-meanings",
     "/api/signup",
   ],
 };

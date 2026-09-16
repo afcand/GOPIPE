@@ -356,6 +356,72 @@ async def page_png(
     )
 
 
+@app.post("/pick")
+async def pick_point(
+    storage_path: str = Form(""),
+    page: int = Form(1),
+    mode: str = Form("duct"),
+    x: float = Form(0.5),
+    y: float = Form(0.5),
+    file: UploadFile | None = File(None),
+    x_gopipe_key: str | None = Header(default=None),
+):
+    """図面の1点を指して、そこにあるものだけを拾う（色／ダクト1本／記号1つ）。
+
+    指した時点で「どれを数えるか」が決まっているので、拾い過ぎも拾い漏れも起きない。
+    画像認識は使わないので費用は0、同じ点を指せば毎回同じ数になる。
+    """
+    if storage_path:
+        _require_key(x_gopipe_key, "Storage 上の図面の読み込み")
+    pdf = _save_upload(file, storage_path)
+    if not Path(pdf).exists():
+        raise HTTPException(status_code=400, detail="図面を指定してください")
+    try:
+        import fitz
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"PDFを開けません: {e}") from e
+
+    from gopipe_takeoff import pick as _pick
+    from gopipe_takeoff.duct_geometry import calibrate_scale
+
+    doc = fitz.open(pdf)
+    if page < 1 or page > doc.page_count:
+        doc.close()
+        raise HTTPException(status_code=400, detail=f"{doc.page_count}ページの図面に {page}ページ目はありません")
+    pg = doc[page - 1]
+    # 画面から来るのは紙の左上0,0・右下1,1の比率。ここで紙の座標へ戻す。
+    px = pg.rect.x0 + pg.rect.width * min(1.0, max(0.0, x))
+    py = pg.rect.y0 + pg.rect.height * min(1.0, max(0.0, y))
+
+    m = (mode or "duct").strip().lower()
+    if m in ("duct", "color"):
+        # 🔴 縮尺は図枠の表記を直結せず、図面の印字寸法で確かめてから使う
+        #（1/50 の表記が実効 1/72.6 だった実物がある）。
+        scale, how = calibrate_scale(pg)
+    else:
+        scale, how = 1.0, ""
+
+    if m == "color":
+        res = _pick.pick_color(pg, px, py, scale=scale)
+    elif m == "symbol":
+        res = _pick.pick_symbol(pg, px, py, page_no=page)
+    elif m == "duct":
+        res = _pick.pick_duct(pg, px, py, scale=scale, page_no=page)
+    else:
+        doc.close()
+        raise HTTPException(status_code=400, detail=f"指し方 {m} は知りません（color / duct / symbol）")
+    has_vector = len(pg.get_drawings()) > 0
+    doc.close()
+
+    return {
+        "kind": res.kind, "label": res.label, "note": res.note, "detail": res.detail,
+        "items": _items_json(res.items),
+        "scale": {"value": scale, "how": how} if how else None,
+        # 紙のスキャンには図形が無い。画面で理由を言えるように返す。
+        "vector": has_vector,
+    }
+
+
 @app.post("/estimate")
 async def estimate(
     provider: str = Form("mock"),

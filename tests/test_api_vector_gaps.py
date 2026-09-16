@@ -142,3 +142,73 @@ def test_page_png_refuses_a_page_that_does_not_exist():
     res = client.post("/page_png", data={"page": "99"},
                       files={"file": ("d.pdf", _pdf_bytes(), "application/pdf")})
     assert res.status_code == 400
+
+
+# --- 1点を指して拾う --------------------------------------------------------
+
+
+def test_pick_requires_a_drawing():
+    res = client.post("/pick", data={"mode": "duct", "x": "0.5", "y": "0.5"})
+    assert res.status_code == 400
+
+
+def test_pick_refuses_an_unknown_mode():
+    res = client.post("/pick", data={"mode": "taste", "x": "0.5", "y": "0.5"},
+                      files={"file": ("d.pdf", _pdf_bytes(), "application/pdf")})
+    assert res.status_code == 400
+
+
+def test_pick_color_reports_the_color_and_how_many():
+    """線を指すと、その色と、同じ色が何個あるかが返る。"""
+    import fitz
+
+    doc = fitz.open()
+    pg = doc.new_page(width=400, height=400)
+    for i in range(5):
+        pg.draw_line(fitz.Point(50, 50 + i * 20), fitz.Point(350, 50 + i * 20), color=(1, 0, 0))
+    pg.draw_line(fitz.Point(50, 300), fitz.Point(350, 300), color=(0, 0, 1))
+    res = client.post(
+        "/pick",
+        data={"mode": "color", "x": str(200 / 400), "y": str(50 / 400)},
+        files={"file": ("d.pdf", doc.tobytes(), "application/pdf")},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["detail"]["hex"] == "#ff0000"
+    assert body["detail"]["shapes"] == 5, "同じ色の線だけを数える（青は入らない）"
+
+
+def test_pick_symbol_counts_the_same_shape():
+    """記号を指すと、同じ形が図面に何個あるかを数える。"""
+    import fitz
+
+    doc = fitz.open()
+    pg = doc.new_page(width=400, height=400)
+    for i in range(7):
+        x, y = 40 + (i % 4) * 80, 40 + (i // 4) * 80
+        pg.draw_rect(fitz.Rect(x, y, x + 12, y + 12), color=(0, 0, 0))
+        pg.draw_line(fitz.Point(x, y), fitz.Point(x + 12, y + 12), color=(0, 0, 0))
+    res = client.post(
+        "/pick",
+        data={"mode": "symbol", "x": str(46 / 400), "y": str(46 / 400)},
+        files={"file": ("d.pdf", doc.tobytes(), "application/pdf")},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["detail"]["count"] >= 1
+    assert body["items"][0]["unit"] == "個"
+
+
+def test_pick_duct_says_why_when_there_is_no_fill():
+    """塗りが無い場所を指したら、0mと答えずに理由を返す。"""
+    import fitz
+
+    doc = fitz.open()
+    pg = doc.new_page(width=400, height=400)
+    pg.draw_line(fitz.Point(10, 10), fitz.Point(390, 10), color=(0, 0, 0))
+    res = client.post("/pick", data={"mode": "duct", "x": "0.5", "y": "0.9"},
+                      files={"file": ("d.pdf", doc.tobytes(), "application/pdf")})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["items"] == []
+    assert "塗られた図形がありません" in body["note"]
