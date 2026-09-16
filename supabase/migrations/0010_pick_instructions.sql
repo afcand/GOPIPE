@@ -11,7 +11,10 @@
 -- 同じ鍵になる。空文字は「この会社の全図面」を意味する。
 
 create table if not exists pick_instructions (
-  id         uuid primary key default uuid_generate_v4(),
+  -- 🔴 uuid_generate_v4() は uuid-ossp 拡張の関数で、実行する役割の search_path に
+  -- extensions スキーマが無いと落ちる（2026-09-16 に db push がここで失敗）。
+  -- gen_random_uuid() は Postgres 本体の関数なので、どの役割からでも通る。
+  id         uuid primary key default gen_random_uuid(),
   org_id     uuid not null references organizations(id) on delete cascade,
   kind       text not null check (kind in ('region', 'color')),
   sheet_key  text not null default '',
