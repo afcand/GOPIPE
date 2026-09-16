@@ -180,7 +180,8 @@ def _why_empty(pdf: Path, *, no_llm: bool) -> str:
 
     if not text and no_llm:
         return ("この図面には文字が入っていません（紙をスキャンした図面です）。"
-                "「画像認識を使わない」のチェックを外すと読めます（この場合は料金がかかります）")
+                "「画像認識を使わない」のチェックを外すと、AIが画像から読み取ります"
+                "（CADのPDFより精度は落ちます）")
     if not text and not shapes:
         return "この範囲には図も文字もありません。図が描かれているところを囲んでください"
     if not text:
@@ -209,7 +210,8 @@ def _sheet_key_for(pdf: Path) -> str:
 
         drawing = load_pdf(pdf, render=False)
         frame = _detect_frame(drawing)
-        key = sheet_key_of(drawing, [f.text for f in frame])
+        # 図枠と判定した文字は FrameReport.keys の2番目（kind, text, x, y）
+        key = sheet_key_of(drawing, [k[1] for k in getattr(frame, "keys", set())])
     except Exception:  # noqa: BLE001  鍵が作れなくても拾い出しは続く
         key = ""
     if len(_SHEET_KEY_CACHE) > 64:
@@ -307,6 +309,9 @@ async def takeoff(
     # 人が画面で囲んだ範囲（紙の左上を0,0・右下を1,1とした比率のJSON）。
     # 1枚を丸ごと読ませると、大判ほど実効解像度が落ち、断面図や別階が混ざる。
     region: str = Form(""),
+    # 縮尺の分母（1/50 なら 50）。0 なら図面から測る。範囲を切ると図枠の通り芯ごと
+    # 落ちて自己校正できないことがあるので、人が入れられるようにする。
+    scale_denom: float = Form(0),
     file: UploadFile | None = File(None),
     x_gopipe_key: str | None = Header(default=None),
 ):
@@ -359,6 +364,25 @@ async def takeoff(
         resp["color_rules"] = {"added": result.color_rule_rows, "dropped": result.color_rule_dropped}
     if getattr(result, "sheet_key", ""):
         resp["sheet_key"] = result.sheet_key
+    # 囲んだ範囲の寸法。印字が拾えない図面でも、線の長さは測れる。
+    if used.get("pdf") and reg_dict:
+        try:
+            import fitz
+
+            from gopipe_takeoff import pick as _pick
+            from gopipe_takeoff.duct_geometry import calibrate_scale as _cal
+
+            doc = fitz.open(used["pdf"])
+            pg0 = doc[0]
+            if scale_denom and scale_denom > 0:
+                sc, how = float(scale_denom), f"人が入れた縮尺 1/{scale_denom:g}"
+            else:
+                sc, how = _cal(pg0)
+            resp["measures"] = _pick.measure_area(pg0, scale=sc)
+            resp["measures"]["scale"] = {"value": sc, "how": how}
+            doc.close()
+        except Exception:  # noqa: BLE001  寸法が測れなくても明細は返す
+            pass
     if persist:
         # 書き込みは service_role（RLSバイパス）で走る。無認証で開けない。
         _require_key(x_gopipe_key, "persist=true")
@@ -442,6 +466,10 @@ async def pick_point(
     mode: str = Form("duct"),
     x: float = Form(0.5),
     y: float = Form(0.5),
+    # 縮尺の分母（1/50 なら 50）。0 なら図面から自分で測る。
+    # 🔴 図枠の表記が実物と違う図面がある（1/50表記が実効1/72.6だった実物あり）ので、
+    # 人が入れた値を最優先する。
+    scale_denom: float = Form(0),
     file: UploadFile | None = File(None),
     x_gopipe_key: str | None = Header(default=None),
 ):
@@ -473,7 +501,9 @@ async def pick_point(
     py = pg.rect.y0 + pg.rect.height * min(1.0, max(0.0, y))
 
     m = (mode or "duct").strip().lower()
-    if m in ("duct", "color"):
+    if scale_denom and scale_denom > 0:
+        scale, how = float(scale_denom), f"人が入れた縮尺 1/{scale_denom:g}"
+    elif m in ("duct", "color", "pipe"):
         # 🔴 縮尺は図枠の表記を直結せず、図面の印字寸法で確かめてから使う
         #（1/50 の表記が実効 1/72.6 だった実物がある）。
         scale, how = calibrate_scale(pg)
@@ -481,14 +511,21 @@ async def pick_point(
         scale, how = 1.0, ""
 
     if m == "color":
-        res = _pick.pick_color(pg, px, py, scale=scale)
+        res = _pick.pick_color(pg, px, py, scale=scale, page_no=page)
     elif m == "symbol":
         res = _pick.pick_symbol(pg, px, py, page_no=page)
     elif m == "duct":
         res = _pick.pick_duct(pg, px, py, scale=scale, page_no=page)
+    elif m == "pipe":
+        # 配管は単線なので、面積と周長では解けない。線をたどって延長を出し、
+        # 曲がりと分岐も数える（継手は延長の中に入っていない＝別に拾うもの）。
+        res = _pick.pick_pipe(pg, px, py, scale=scale, page_no=page)
     else:
         doc.close()
-        raise HTTPException(status_code=400, detail=f"指し方 {m} は知りません（color / duct / symbol）")
+        raise HTTPException(
+            status_code=400,
+            detail=f"指し方 {m} は知りません（color / duct / pipe / symbol）",
+        )
     has_vector = len(pg.get_drawings()) > 0
     doc.close()
 

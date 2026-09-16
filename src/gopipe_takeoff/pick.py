@@ -85,7 +85,7 @@ def _seg_len_pt(d) -> float:
 # --- 色を指す ---------------------------------------------------------------
 
 
-def pick_color(page, x: float, y: float, *, scale: float = 1.0) -> PickResult:
+def pick_color(page, x: float, y: float, *, scale: float = 1.0, page_no: int = 1) -> PickResult:
     """指した線の色を採り、同じ色のものを図面全体から集める。
 
     色の意味（給気/還気/既存/新設…）は会社ごと図面ごとにしか決まらないので、
@@ -112,18 +112,38 @@ def pick_color(page, x: float, y: float, *, scale: float = 1.0) -> PickResult:
                 r = o.get("rect")
                 if r is not None:
                     area_pt2 += r.width * r.height
+    length_m = length_pt * mm_per_pt / 1000.0
+    area_m2 = area_pt2 * (mm_per_pt / 1000.0) ** 2
+    hx = _hex(rgb)
+    # 🔴 数だけでは見積に使えない。長さ（と塗りなら面積）も行にして出す。
+    items: list[TakeoffItem] = []
+    if length_m >= 0.1:
+        items.append(TakeoffItem(
+            page=page_no, name=f"この色の線の延長 {hx}", spec=f"色 {hx}",
+            quantity=round(length_m, 1), unit="m", category=None,
+            confidence=0.8, qty_basis="measure", source="pick",
+            location=f"同じ色の図形 {n} 個ぶん",
+        ))
+    if area_m2 >= 0.05:
+        items.append(TakeoffItem(
+            page=page_no, name=f"この色の塗りの面積 {hx}", spec=f"色 {hx}",
+            quantity=round(area_m2, 1), unit="m2", category=None,
+            confidence=0.7, qty_basis="measure", source="pick",
+            location="外周の四角で測った概算",
+        ))
     return PickResult(
         kind="color",
-        label=_hex(rgb),
+        label=(f"{hx}／{n}個"
+               + (f"／{length_m:.1f} m" if length_m >= 0.1 else "")
+               + (f"／{area_m2:.1f} m2" if area_m2 >= 0.05 else "")),
         detail={
-            "hex": _hex(rgb),
-            "shapes": n,
-            "length_m": round(length_pt * mm_per_pt / 1000.0, 1),
-            "area_m2": round(area_pt2 * (mm_per_pt / 1000.0) ** 2, 1),
+            "hex": hx, "shapes": n,
+            "length_m": round(length_m, 1), "area_m2": round(area_m2, 1),
             "is_fill": d.get("fill") is not None,
         },
-        note=(f"同じ色の図形が {n} 個。線の長さの合計 "
-              f"{length_pt * mm_per_pt / 1000.0:.1f} m（図面の縮尺で換算）"),
+        items=items,
+        note=("長さは図面の縮尺で換算した値です。面積は塗りの外周の四角で測った概算なので、"
+              "斜めの形では多めに出ます"),
     )
 
 
@@ -224,3 +244,262 @@ def pick_symbol(page, x: float, y: float, *, page_no: int = 1) -> PickResult:
         items=[item],
         note="名前は図面から引いていません。何の記号かを入れてください",
     )
+
+# --- 配管を指す -------------------------------------------------------------
+
+
+def _segments(d) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """その図形を、線分の並びに開く（曲線は両端で近似する）。"""
+    out = []
+    for it in d.get("items", []):
+        if it[0] == "l":
+            p, q = it[1], it[2]
+            out.append(((p.x, p.y), (q.x, q.y)))
+        elif it[0] == "c":
+            p, q = it[1], it[4]
+            out.append(((p.x, p.y), (q.x, q.y)))
+        elif it[0] == "re":
+            r = it[1]
+            cs = [(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)]
+            out += [(cs[i], cs[(i + 1) % 4]) for i in range(4)]
+    return out
+
+
+def _dist(a, b) -> float:
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+def _nearest_label(page, pts, *, limit_pt: float = 26.0) -> str:
+    """たどった線のそばに刷られている呼び径などの文字を1つ拾う。
+
+    近いというだけで結び付けない（幅の合わないラベルを採ると数量が化ける）ので、
+    **線のすぐ脇にあるものだけ**を採り、無ければ空で返す。人が入れるほうが安全。
+    """
+    best, best_d = "", limit_pt
+    try:
+        blocks = page.get_text("dict").get("blocks", [])
+    except Exception:  # noqa: BLE001
+        return ""
+    for b in blocks:
+        for line in b.get("lines", []):
+            t = "".join(sp.get("text", "") for sp in line.get("spans", [])).strip()
+            if not t or len(t) > 24:
+                continue
+            x0, y0, x1, y1 = line.get("bbox") or (0, 0, 0, 0)
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            d = min(_dist((cx, cy), q) for q in pts)
+            if d < best_d:
+                best, best_d = t, d
+    return best
+
+
+def _dedupe_segments(segs, *, grid: float = 0.5):
+    """同じ線分が重ねて描かれている分をまとめる。
+
+    CADの図面では、同じ線が複数の図形として重なって入っていることがある。
+    そのまま数えると、端点に線が何本も集まっているように見えて、分岐が実際の
+    何倍にもなる（実測: 分岐98箇所）。向きを問わず同じ端点の組は1本にする。
+    """
+    seen = set()
+    out = []
+    for a, b in segs:
+        ka = (round(a[0] / grid), round(a[1] / grid))
+        kb = (round(b[0] / grid), round(b[1] / grid))
+        if ka == kb:
+            continue                      # 長さ0の線は数えない
+        key = (ka, kb) if ka <= kb else (kb, ka)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((a, b))
+    return out
+
+
+def _bends(front, *, tol: float = 1.6) -> dict:
+    """たどった線の「曲がり」と「分岐」を数える。
+
+    配管の積算では、延長と同じくらいエルボ（曲がり）が効く。継手は部材として拾うもので、
+    長さの中には入っていない。端点が集まっているところを見て、
+      ・2本が集まる → その角度で 90度・45度・その他の曲がり（まっすぐは数えない）
+      ・3本以上    → 分岐（チーズ）
+    と分ける。角度は図面に描かれたとおりで、規格の当てはめはしない（人が直せる形で出す）。
+    """
+    import math
+    from collections import defaultdict
+
+
+    buckets: dict[tuple[int, int], list] = defaultdict(list)
+    for sg in front:
+        for i, end in enumerate(sg):
+            other = sg[1 - i]
+            key = (round(end[0] / tol), round(end[1] / tol))
+            buckets[key].append((end, other))
+
+    out = {"bend90": 0, "bend45": 0, "bend_other": 0, "branch": 0}
+    for key, arms in buckets.items():
+        if len(arms) < 2:
+            continue
+        # 同じ向きへ伸びる腕は1本として数える（重なった線・継ぎ足しの線を分岐にしない）
+        dirs = []
+        for p, q in arms:
+            vx, vy = q[0] - p[0], q[1] - p[1]
+            n = math.hypot(vx, vy)
+            if n < 0.5:
+                continue
+            u = (vx / n, vy / n)
+            if not any(u[0] * v[0] + u[1] * v[1] > 0.97 for v in dirs):   # 約14度以内は同じ向き
+                dirs.append(u)
+        if len(dirs) < 2:
+            continue
+        if len(dirs) >= 3:
+            out["branch"] += 1
+            continue
+        (p0, q0), (p1, q1) = arms[:2]
+        v0 = (q0[0] - p0[0], q0[1] - p0[1])
+        v1 = (q1[0] - p1[0], q1[1] - p1[1])
+        n0 = math.hypot(*v0)
+        n1 = math.hypot(*v1)
+        if n0 < 0.5 or n1 < 0.5:
+            continue
+        cos = max(-1.0, min(1.0, (v0[0] * v1[0] + v0[1] * v1[1]) / (n0 * n1)))
+        turn = 180.0 - math.degrees(math.acos(cos))   # まっすぐなら0度
+        if turn < 15:
+            continue
+        if 70 <= turn <= 110:
+            out["bend90"] += 1
+        elif 30 <= turn < 70:
+            out["bend45"] += 1
+        else:
+            out["bend_other"] += 1
+    return out
+
+def pick_pipe(page, x: float, y: float, *, scale: float, page_no: int = 1) -> PickResult:
+    """指した配管を、線をたどって延長を出す。
+
+    配管は単線で描かれるのでダクトのように面積と周長では解けない。指した線から
+    端点が繋がっている線分を同じ色でたどり、その長さを合計する。
+    たどるのを同じ色に限るのは、交差する別系統へ乗り移らないため
+    （乗り移ると、1本のつもりが建物中の線を足した数字になる）。
+    """
+    from .duct_geometry import PT2MM
+
+    d = _under(page, x, y, want=lambda o: o.get("fill") is None and o.get("items"))
+    if d is None:
+        return PickResult(kind="pipe", label="",
+                          note="その場所に線がありません。配管の線の上を指してください")
+    rgb = d.get("color")
+    # 🔴 色だけでたどると、同じ黒で描かれた図枠の罫線や通り芯へ乗り移る
+    # （実測: 指した先が78.6mの直線＝図枠だった）。**線幅でも絞る**。
+    # BK平塚で「壁は線幅0.5ptだけ」で見分けたのと同じ手。
+    w0 = float(d.get("width") or 0.0)
+    segs: list = []
+    for o in visible_drawings(page):
+        if o.get("fill") is not None:
+            continue
+        if rgb is not None and not _same(o.get("color"), rgb, tol=0.06):
+            continue
+        w = float(o.get("width") or 0.0)
+        if w0 > 0 and abs(w - w0) > max(0.12, w0 * 0.35):
+            continue
+        segs += _segments(o)
+    if not segs:
+        return PickResult(kind="pipe", label="", note="たどれる線がありません")
+
+    # 指した点にいちばん近い線分から、端点が繋がっているものを広げていく
+    def mid(s):
+        return ((s[0][0] + s[1][0]) / 2, (s[0][1] + s[1][1]) / 2)
+
+    start = min(range(len(segs)), key=lambda i: _dist(mid(segs[i]), (x, y)))
+    TOL = 1.6                      # 端点が離れていても、この範囲なら繋がっているとみなす
+    used = {start}
+    front = [segs[start]]
+    ends = [segs[start][0], segs[start][1]]
+    changed = True
+    while changed and len(used) < 4000:
+        changed = False
+        for i, sg in enumerate(segs):
+            if i in used:
+                continue
+            if any(_dist(e, sg[0]) <= TOL or _dist(e, sg[1]) <= TOL for e in ends):
+                used.add(i)
+                front.append(sg)
+                ends += [sg[0], sg[1]]
+                changed = True
+
+    front = _dedupe_segments(front)
+    mm_per_pt = PT2MM * scale
+    length_m = sum(_dist(a, b) for a, b in front) * mm_per_pt / 1000.0
+    if length_m <= 0:
+        return PickResult(kind="pipe", label="", note="長さが出せませんでした")
+    label_txt = _nearest_label(page, [p for sg in front for p in sg])
+    bend = _bends(front)
+    items = [TakeoffItem(
+        page=page_no, name="配管（指して実測）", spec=label_txt or None,
+        quantity=round(length_m, 1), unit="m", confidence=0.85,
+        category="配管", qty_basis="measure", source="pick",
+        location=f"{len(front)}区間をたどりました",
+    )]
+    # 🔴 曲がりは延長の中に入っていない。継手は部材として別に拾うもので、
+    # ここを落とすと「長さは合っているのに材料が足りない」見積になる。
+    for key, name in (("bend90", "曲がり 90度"), ("bend45", "曲がり 45度"),
+                      ("bend_other", "曲がり その他の角度"), ("branch", "分岐")):
+        if bend[key]:
+            items.append(TakeoffItem(
+                page=page_no, name=f"{name}（指して計数）",
+                spec=label_txt or None, quantity=float(bend[key]), unit="箇所",
+                category="継手・付属", confidence=0.6, qty_basis="count", source="pick",
+                location="指した配管の上（弁・器具の記号を含む場合があります）",
+            ))
+    parts = [f"{length_m:.1f} m"]
+    if label_txt:
+        parts.append(f"（{label_txt}）")
+    turns = bend["bend90"] + bend["bend45"] + bend["bend_other"]
+    if turns:
+        parts.append(f"／曲がり {turns}箇所")
+    if bend["branch"]:
+        parts.append(f"／分岐 {bend['branch']}箇所")
+    return PickResult(
+        kind="pipe",
+        label="".join(parts),
+        detail={"length_m": round(length_m, 2), "segments": len(front), "label": label_txt,
+                "hex": _hex(rgb), **bend},
+        items=items,
+        note=(("そばの印字から呼び径を採りました。図面と違う場合は直してください。"
+               if label_txt else "呼び径は図面から取れませんでした。人が入れてください。")
+              + "曲がりと分岐は図面の線から数えた値です。弁や器具の記号が線として"
+                "つながっている分を含むことがあるので、多めに出ます（要確認）"),
+    )
+
+# --- 範囲の寸法 -------------------------------------------------------------
+
+
+def measure_area(page, *, scale: float, top: int = 6) -> dict:
+    """その紙（＝囲んだ範囲）にある線の長さを、色ごとに合計する。
+
+    囲んだだけでは「何がどれだけあるか」が分からない。印字を拾えない図面でも、
+    線の長さは測れる。ただし何の線かは機械には分からないので、色ごとに出して
+    人が意味を当てる（色の意味は会社ごとにしか決まらない）。
+    """
+    from .duct_geometry import PT2MM
+
+    mm_per_pt = PT2MM * scale
+    by_color: dict[str, list[float]] = {}
+    for d in visible_drawings(page):
+        if d.get("fill") is not None and d.get("color") is None:
+            continue
+        hx = _hex(d.get("color")) or _hex(d.get("fill"))
+        if not hx:
+            continue
+        length = _seg_len_pt(d)
+        if length <= 0:
+            continue
+        cur = by_color.setdefault(hx, [0.0, 0.0])
+        cur[0] += length
+        cur[1] += 1
+    rows = sorted(
+        ({"hex": k, "length_m": round(v[0] * mm_per_pt / 1000.0, 1), "shapes": int(v[1])}
+         for k, v in by_color.items()),
+        key=lambda r: -r["length_m"],
+    )
+    rows = [r for r in rows if r["length_m"] >= 0.5][:top]
+    return {"by_color": rows, "total_m": round(sum(r["length_m"] for r in rows), 1)}

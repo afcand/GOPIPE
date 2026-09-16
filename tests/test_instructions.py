@@ -84,3 +84,19 @@ def test_rule_from_payload_defaults_are_safe():
     r = ColorRule.from_payload({"hex": "#AABBCC", "name": "外気"})
     assert r and r.action == "count" and r.unit == "個"
     assert ColorRule.from_payload({"hex": "あお"}) is None, "色として読めないものは覚えない"
+
+
+def test_sheet_key_reads_frame_report_shape():
+    """🔴 図枠の入れ物（FrameReport）はそのまま回せない。
+
+    `for f in frame` と書いて 'FrameReport' object is not iterable で落ち、
+    覚えた指示が黙って当たらなくなっていた（拾い出しは続くので気づけない）。
+    図枠の文字は keys の2番目に入っている。
+    """
+    from gopipe_takeoff.frame_filter import FrameReport
+
+    rep = FrameReport(keys={("duct", "M-001", 0.1, 0.2), ("duct", "空調ダクト図", 0.3, 0.4),
+                            ("duct", "1階", 0.5, 0.6), ("duct", "NEC", 0.7, 0.8),
+                            ("duct", "S=1/50", 0.9, 0.1), ("duct", "2026", 0.2, 0.3)})
+    texts = [k[1] for k in rep.keys]
+    assert sheet_key_of(None, texts), "図枠の文字から鍵が作れること"

@@ -13,7 +13,7 @@ import type { TakeoffItem } from "@/lib/gopipe";
  */
 
 type Gap = { item: string; reason: string; action: string; pages: number[] };
-type Tool = "range" | "color" | "duct" | "symbol";
+type Tool = "range" | "color" | "duct" | "pipe" | "symbol";
 /** 覚えている指示。箇所（前回どこを拾ったか）と色（この色はこう拾う）。 */
 type Saved = {
   kind: "region" | "color";
@@ -40,6 +40,9 @@ type Pick = {
   items: TakeoffItem[];
   gaps: Gap[];
   llmCalls: number;
+  /** その範囲にある線の長さ（色別）。印字が拾えない図面でも寸法だけは出る。 */
+  measures?: { total_m: number; by_color: { hex: string; length_m: number; shapes: number }[];
+               scale?: { value: number; how: string } };
   /** 0件だったときの理由（図面が悪いのか、指す場所か、読ませ方かを言い分ける） */
   reason?: string;
 };
@@ -70,6 +73,9 @@ export default function Picker({
   const [meaning, setMeaning] = useState<Record<string, string>>({});
   const [sheetKey, setSheetKey] = useState("");
   const [pageHasText, setPageHasText] = useState(true);
+  // 縮尺の分母（1/50 なら 50）。空なら図面から自分で測る。
+  // 図枠の表記が実物と違う図面があり、範囲を切ると通り芯ごと落ちて測れないこともある。
+  const [scaleDenom, setScaleDenom] = useState("");
   const [saved, setSaved] = useState<Saved[]>([]);
   // 色をどう拾うか（名前・単位・数える/長さ/拾わない）。名前だけでは数量にならない。
   const [rule, setRule] = useState<Record<string, { name: string; action: string; unit: string }>>({});
@@ -207,6 +213,7 @@ export default function Picker({
           fileName: file?.name ?? "",
           noLlm,
           region: { page, ...box },
+          scaleDenom: scaleDenom.trim() ? Number(scaleDenom) : 0,
         }),
       });
       const data = await res.json();
@@ -225,6 +232,7 @@ export default function Picker({
           gaps: Array.isArray(data.gaps) ? data.gaps : [],
           llmCalls: typeof data.llm_calls === "number" ? data.llm_calls : 0,
           reason: typeof data.reason === "string" ? data.reason : "",
+          measures: data.measures,
         },
       ]);
       setDrag(null);
@@ -244,7 +252,10 @@ export default function Picker({
       const res = await fetch("/api/pick", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ storagePath: path, page, mode: tool, x: at.x, y: at.y }),
+        body: JSON.stringify({
+          storagePath: path, page, mode: tool, x: at.x, y: at.y,
+          scaleDenom: scaleDenom.trim() ? Number(scaleDenom) : 0,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? "指した場所を拾えませんでした");
@@ -434,6 +445,15 @@ export default function Picker({
               </button>
             </span>
           )}
+          <label className="flex items-center gap-2 text-[13px] text-[var(--mut)]">
+            縮尺 1/
+            <input
+              value={scaleDenom}
+              onChange={(e) => setScaleDenom(e.target.value.replace(/[^0-9.]/g, ""))}
+              placeholder="図面から測る"
+              className="w-[92px] rounded-[8px] border border-[var(--line)] bg-[var(--navy2)] px-2 py-1.5 text-[13px] focus:border-[var(--cyan)] focus:outline-none"
+            />
+          </label>
           <label className="ml-auto flex cursor-pointer items-center gap-2 text-[13px] text-[var(--mut)]">
             <input
               type="checkbox"
@@ -441,12 +461,13 @@ export default function Picker({
               onChange={(e) => setNoLlm(e.target.checked)}
               className="h-4 w-4 accent-[var(--cyan)]"
             />
-            画像認識を使わない（CADのPDF・費用0）
+            画像認識を使わない（CADのPDF向け・毎回同じ数が出ます）
           </label>
           {!pageHasText && (
             <p className="m-0 basis-full text-[12.5px] text-[#ffab33]">
               この図面には文字が入っていません（紙をスキャンした図面です）。印字だけでは拾えないので、
-              画像認識を使う設定にしました。料金がかかります。
+              AIが画像から読み取ります。CADから書き出したPDFに比べて精度が落ち、読ませ方によって
+              数量が変わることがあります。同じ図面のCAD版があれば、そちらをお使いください。
             </p>
           )}
         </div>
@@ -457,6 +478,7 @@ export default function Picker({
             ["range", "範囲を囲む", "囲んだ中だけを拾う"],
             ["color", "色を指す", "同じ色のものを集める"],
             ["duct", "ダクトを指す", "その1本の延長と幅を測る"],
+            ["pipe", "配管を指す", "線をたどって延長・曲がり・分岐"],
             ["symbol", "記号を指す", "同じ形が何個あるか数える"],
           ] as [Tool, string, string][]).map(([t, name, hint]) => (
             <button
@@ -592,8 +614,10 @@ export default function Picker({
             <div className="mt-3 flex flex-wrap items-center gap-3">
               {tool !== "range" && (
                 <span className="text-[13.5px] font-bold text-[#a06bff]">
-                  図面の{tool === "color" ? "線" : tool === "duct" ? "ダクトの帯の内側" : "記号"}を
-                  クリックしてください
+                  図面の
+                  {tool === "color" ? "線" : tool === "duct" ? "ダクトの帯の内側"
+                    : tool === "pipe" ? "配管の線の上" : "記号"}
+                  をクリックしてください
                 </span>
               )}
               <button
@@ -636,7 +660,8 @@ export default function Picker({
                   <li key={p.id} className="border-t border-[var(--line)] pt-3 first:border-t-0 first:pt-0">
                     <p className="m-0 text-[14px]">
                       <span className="mr-2 rounded bg-[rgba(123,63,228,0.18)] px-2 py-0.5 text-[11.5px] font-bold text-[#a06bff]">
-                        {p.tool === "color" ? "色" : p.tool === "duct" ? "ダクト" : "記号"}
+                        {p.tool === "color" ? "色" : p.tool === "duct" ? "ダクト"
+                          : p.tool === "pipe" ? "配管" : "記号"}
                       </span>
                       {hex && (
                         <span
@@ -752,6 +777,33 @@ export default function Picker({
                     ほか {p.items.length - 40} 件（Excel には全部入ります）
                   </p>
                 )}
+              </div>
+            )}
+            {p.measures && p.measures.by_color.length > 0 && (
+              <div className="mt-3 rounded-[10px] border border-[var(--line)] p-3">
+                <p className="m-0 mb-1 text-[13px] font-bold">
+                  この範囲の寸法（線の長さ 合計 {p.measures.total_m} m）
+                  {p.measures.scale && (
+                    <span className="ml-2 text-[11.5px] font-normal text-[var(--mut)]">
+                      {p.measures.scale.how}
+                    </span>
+                  )}
+                </p>
+                <ul className="m-0 flex list-none flex-wrap gap-x-4 gap-y-1 p-0 text-[12.5px]">
+                  {p.measures.by_color.map((c) => (
+                    <li key={c.hex} className="flex items-center gap-1.5">
+                      <span
+                        className="inline-block h-3 w-3 rounded-sm border border-[var(--line)]"
+                        style={{ background: c.hex }}
+                      />
+                      <b>{c.length_m} m</b>
+                      <span className="text-[var(--mut)]">（{c.shapes}本 {c.hex}）</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="m-0 mt-1 text-[11.5px] text-[var(--mut)]">
+                  何の線かは機械には分かりません。色を指して意味を覚えさせると、次から名前が付きます。
+                </p>
               </div>
             )}
             <div className="mt-2">

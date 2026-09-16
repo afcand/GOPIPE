@@ -23,7 +23,7 @@ export async function POST(req: Request) {
     return Response.json({ error: "サーバの設定が未完了です" }, { status: 503 });
   }
 
-  const { storagePath, projectSlug, title, fileName, noLlm, region } = await req.json();
+  const { storagePath, projectSlug, title, fileName, noLlm, region, scaleDenom } = await req.json();
   if (typeof storagePath !== "string" || !storagePath.startsWith(`${me.org.slug}/`)) {
     return Response.json({ error: "図面の指定が不正です" }, { status: 400 });
   }
@@ -42,6 +42,8 @@ export async function POST(req: Request) {
   // 人が画面で囲んだ範囲。1枚を丸ごと読ませると、大判ほど実効解像度が落ち、
   // 断面図や別階が混ざり、割り方で数量が変わる（実測済み）。
   if (region && typeof region === "object") form.set("region", JSON.stringify(region));
+  // 縮尺は人が入れた値を最優先する（図枠の表記が実物と違う図面がある）
+  if (Number(scaleDenom) > 0) form.set("scale_denom", String(Number(scaleDenom)));
 
   const res = await fetch(`${API_BASE}/takeoff`, {
     method: "POST",

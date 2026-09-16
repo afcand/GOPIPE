@@ -204,7 +204,10 @@ class TakeoffPipeline:
             from .instructions import ColorRule, apply_skips, color_items, sheet_key_of
             from .learned import current_org
 
-            sheet_key = sheet_key_of(drawing, [f.text for f in frame] if use_vector_text else [])
+            # 🔴 frame は FrameReport（集合を持つ入れ物）で、そのまま回せない。
+            # 図枠と判定した文字は keys の2番目に入っている（kind, text, x, y）。
+            frame_texts = [k[1] for k in getattr(frame, "keys", set())] if use_vector_text else []
+            sheet_key = sheet_key_of(drawing, frame_texts)
             rules = _load_color_rules(current_org(), sheet_key)
             if rules:
                 import fitz

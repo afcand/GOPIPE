@@ -288,3 +288,45 @@ def test_page_png_tells_whether_the_paper_has_text():
     cad = client.post("/page_png", data={"page": "1", "dpi": "60"},
                       files={"file": ("c.pdf", _pdf_bytes(), "application/pdf")})
     assert cad.headers["x-has-text"] == "0" or cad.headers["x-has-text"] == "1"
+
+
+# --- 配管を指す（曲がり・分岐まで数える） ------------------------------------
+
+
+def _pipe_pdf() -> bytes:
+    """90度の曲がり1つ、45度の曲がり1つ、分岐1つを持つ配管。"""
+    import fitz
+
+    doc = fitz.open()
+    pg = doc.new_page(width=400, height=400)
+    pg.draw_line(fitz.Point(50, 50), fitz.Point(200, 50), color=(0, 0, 1))
+    pg.draw_line(fitz.Point(200, 50), fitz.Point(200, 200), color=(0, 0, 1))
+    pg.draw_line(fitz.Point(200, 200), fitz.Point(300, 300), color=(0, 0, 1))
+    pg.draw_line(fitz.Point(200, 200), fitz.Point(100, 200), color=(0, 0, 1))
+    return doc.tobytes()
+
+
+def test_pick_pipe_measures_length_and_counts_bends():
+    """配管は単線なのでダクトの式では解けない。線をたどって延長と曲がりを出す。
+
+    🔴 曲がりは延長の中に入っていない。継手は部材として別に拾うものなので、
+    ここを落とすと「長さは合っているのに材料が足りない」見積になる。
+    """
+    res = client.post("/pick", data={"mode": "pipe", "x": "0.3", "y": "0.125"},
+                      files={"file": ("p.pdf", _pipe_pdf(), "application/pdf")})
+    assert res.status_code == 200
+    body = res.json()
+    d = body["detail"]
+    assert d["length_m"] > 0
+    assert d["bend90"] >= 1, "90度の曲がりを数えること"
+    assert d["branch"] >= 1, "分岐を数えること"
+    names = [i["name"] for i in body["items"]]
+    assert any("配管" in n for n in names)
+    assert any("曲がり" in n for n in names), "曲がりも明細の行になること"
+
+
+def test_pick_pipe_says_why_when_there_is_no_line():
+    res = client.post("/pick", data={"mode": "pipe", "x": "0.9", "y": "0.9"},
+                      files={"file": ("p.pdf", _pipe_pdf(), "application/pdf")})
+    assert res.json()["items"] == []
+    assert "線" in res.json()["note"]
