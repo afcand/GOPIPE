@@ -36,6 +36,7 @@ export const config = {
     "/api/run",
     "/api/page",
     "/api/pick",
+    "/api/instructions",
     "/api/learn",
     "/api/items",
     "/api/items/rows",

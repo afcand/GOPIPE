@@ -157,6 +157,37 @@ def _dictionary_for(org_slug: str = ""):
     return d
 
 
+_SHEET_KEY_CACHE: dict[str, str] = {}
+
+
+def _sheet_key_for(pdf: Path) -> str:
+    """図面の型の鍵。同じ様式の紙なら同じ鍵になり、覚えた指示を引ける。
+
+    図枠の文字を見るだけなので画像は作らない。同じファイルを何度も開くので覚えておく。
+    """
+    try:
+        st = pdf.stat()
+        ck = f"{pdf}:{st.st_mtime_ns}:{st.st_size}"
+    except OSError:
+        return ""
+    if ck in _SHEET_KEY_CACHE:
+        return _SHEET_KEY_CACHE[ck]
+    try:
+        from gopipe_takeoff.frame_filter import detect as _detect_frame
+        from gopipe_takeoff.instructions import sheet_key_of
+        from gopipe_takeoff.pdf_loader import load_pdf
+
+        drawing = load_pdf(pdf, render=False)
+        frame = _detect_frame(drawing)
+        key = sheet_key_of(drawing, [f.text for f in frame])
+    except Exception:  # noqa: BLE001  鍵が作れなくても拾い出しは続く
+        key = ""
+    if len(_SHEET_KEY_CACHE) > 64:
+        _SHEET_KEY_CACHE.clear()
+    _SHEET_KEY_CACHE[ck] = key
+    return key
+
+
 def _takeoff(
     provider: str,
     file: UploadFile | None,
@@ -285,6 +316,12 @@ async def takeoff(
         ]
     if getattr(result, "frame_dropped", 0):
         resp["frame_dropped"] = result.frame_dropped
+    # 覚えた色の指示が効いたことは、必ず画面に出す。黙って行が増減すると
+    # 「なぜこの数字になったか」が誰にも分からなくなる。
+    if getattr(result, "color_rule_rows", 0) or getattr(result, "color_rule_dropped", 0):
+        resp["color_rules"] = {"added": result.color_rule_rows, "dropped": result.color_rule_dropped}
+    if getattr(result, "sheet_key", ""):
+        resp["sheet_key"] = result.sheet_key
     if persist:
         # 書き込みは service_role（RLSバイパス）で走る。無認証で開けない。
         _require_key(x_gopipe_key, "persist=true")
@@ -349,6 +386,7 @@ async def page_png(
         content=data, media_type="image/png",
         headers={
             "x-page-count": str(n),
+            "x-sheet-key": _sheet_key_for(Path(pdf)),
             "x-page-width-pt": f"{w_pt:.1f}",
             "x-page-height-pt": f"{h_pt:.1f}",
             "cache-control": "no-store",
@@ -417,9 +455,74 @@ async def pick_point(
         "kind": res.kind, "label": res.label, "note": res.note, "detail": res.detail,
         "items": _items_json(res.items),
         "scale": {"value": scale, "how": how} if how else None,
+        # 図面の型の鍵。この指示を「同じ様式の紙」に効かせるために画面が持ち回る。
+        "sheet_key": _sheet_key_for(Path(pdf)),
         # 紙のスキャンには図形が無い。画面で理由を言えるように返す。
         "vector": has_vector,
     }
+
+
+@app.get("/instructions")
+async def list_instructions(
+    org_slug: str = "default",
+    kind: str = "",
+    sheet_key: str = "",
+    x_gopipe_key: str | None = Header(default=None),
+):
+    """この会社が覚えさせた指示（箇所・色）を返す。
+
+    sheet_key を渡すと「その図面の型」と「全図面向け」の両方が返る。
+    図面ごとの指示だけにすると、会社共通の決め事が毎回消える。
+    """
+    _require_key(x_gopipe_key, "覚えた指示の参照")
+    from gopipe_takeoff import store
+
+    if not store.is_enabled():
+        return {"instructions": [], "note": "Supabase 未設定"}
+    rows = store.load_pick_instructions(org_slug, kind=kind, sheet_key=sheet_key)
+    return {"count": len(rows), "instructions": rows}
+
+
+@app.post("/instructions")
+async def save_instruction(payload: dict = Body(...), x_gopipe_key: str | None = Header(default=None)):
+    """指した指示を1件覚える（同じ鍵は上書き）。delete=true で消す。"""
+    _require_key(x_gopipe_key, "指示の記録")
+    from gopipe_takeoff import store
+    from gopipe_takeoff.instructions import ColorRule
+
+    org_slug = str(payload.get("org_slug") or "").strip()
+    kind = str(payload.get("kind") or "").strip()
+    if not org_slug or kind not in ("region", "color"):
+        raise HTTPException(status_code=400, detail="org_slug と kind（region / color）は必須です")
+    if not store.is_enabled():
+        raise HTTPException(status_code=503, detail="Supabase 未設定")
+
+    body = payload.get("payload") or {}
+    sheet_key = str(payload.get("sheet_key") or "")
+    if kind == "color":
+        rule = ColorRule.from_payload(body)
+        if rule is None:
+            raise HTTPException(status_code=400, detail="色（#rrggbb）が読めません")
+        ref = rule.hex
+        body = {"hex": rule.hex, "name": rule.name, "action": rule.action,
+                "unit": rule.unit, "category": rule.category}
+    else:
+        try:
+            pg = int(body.get("page") or 1)
+            box = [round(float(body[k]), 4) for k in ("x0", "y0", "x1", "y1")]
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=f"範囲が読めません: {e}") from e
+        # 鍵は丸めた座標。少しずれた囲みを別物として溜めない。
+        ref = f"p{pg}:" + ":".join(f"{round(v, 2)}" for v in box)
+        body = {"page": pg, "x0": box[0], "y0": box[1], "x1": box[2], "y1": box[3],
+                "label": str(body.get("label") or "")[:80]}
+
+    if payload.get("delete"):
+        store.delete_pick_instruction(org_slug, kind=kind, ref=ref, sheet_key=sheet_key)
+        return {"ok": True, "deleted": ref}
+    store.save_pick_instruction(org_slug, kind=kind, ref=ref, payload=body,
+                                sheet_key=sheet_key, note=payload.get("note"))
+    return {"ok": True, "kind": kind, "ref": ref, "sheet_key": sheet_key}
 
 
 @app.post("/estimate")

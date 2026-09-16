@@ -44,6 +44,33 @@ class TakeoffResult:
     # この図面にあるのに、この経路では数えられなかったもの（記号もの・延長 等）。
     # 表に出ない部材は現場から見れば0個に見える。必ず画面・帳票まで運ぶ。
     gaps: list = field(default_factory=list)
+    # この会社が覚えさせた色の指示が、何行を作り、何行を落としたか。
+    # 黙って効かせると「なぜこの行が出た/消えた」が分からなくなる。
+    color_rule_rows: int = 0
+    color_rule_dropped: int = 0
+    # 図面の型の鍵。次に同じ様式の紙が来たとき、覚えた指示を引くのに使う。
+    sheet_key: str = ""
+
+
+def _load_color_rules(org: str, sheet_key: str) -> list:
+    """この会社が覚えさせた色の指示を読む。設定が無ければ黙って空。"""
+    from .instructions import ColorRule
+
+    try:
+        from . import store
+
+        if not store.is_enabled():
+            return []
+        rows = store.load_pick_instructions(org or "default", kind="color", sheet_key=sheet_key)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("色の指示を読めませんでした: %s", e)
+        return []
+    out = []
+    for r in rows or []:
+        rule = ColorRule.from_payload(r.get("payload") or {})
+        if rule:
+            out.append(rule)
+    return out
 
 
 class TakeoffPipeline:
@@ -169,6 +196,35 @@ class TakeoffPipeline:
         logger.info("classifying ...")
         items = classify(raw_items, self.dictionary)
 
+        # この会社が「この色はこう拾う」と覚えさせた指示を当てる。
+        # 色の意味は会社ごとにしか決まらないので、共通辞書には置かない。
+        sheet_key = ""
+        rule_rows = rule_dropped = 0
+        try:
+            from .instructions import ColorRule, apply_skips, color_items, sheet_key_of
+            from .learned import current_org
+
+            sheet_key = sheet_key_of(drawing, [f.text for f in frame] if use_vector_text else [])
+            rules = _load_color_rules(current_org(), sheet_key)
+            if rules:
+                import fitz
+
+                doc = fitz.open(str(input_pdf)) if input_pdf.exists() else None
+                if doc is not None:
+                    extra: list[TakeoffItem] = []
+                    for n, pg in enumerate(doc, start=1):
+                        extra += color_items(pg, rules, page_no=n)
+                    doc.close()
+                    rule_rows = len(extra)
+                    items = list(items) + extra
+                items, rule_dropped = apply_skips(items, rules)
+                logger.info(
+                    "覚えた色の指示 %d件 → %d行を足し、%d行を落としました",
+                    len(rules), rule_rows, rule_dropped,
+                )
+        except Exception as e:  # noqa: BLE001  指示が引けなくても拾い出しは続ける
+            logger.warning("覚えた指示を当てられませんでした: %s", e)
+
         # 🔴 分類(classify)は辞書でカテゴリを塗り替えるため、拾えていないものの判定には
         # **分類前のベクター項目**を渡す。分類後を渡すと『配管の延長が要る』が黙って消える。
         has_text = any(p.text_lines for p in drawing.pages)
@@ -225,6 +281,8 @@ class TakeoffPipeline:
             items=items, excel_path=excel_path, marker_pdf_path=marker_path,
             failures=failures, llm_calls=llm_calls,
             unread_labels=unread, frame_dropped=frame_dropped, gaps=gaps,
+            color_rule_rows=rule_rows, color_rule_dropped=rule_dropped,
+            sheet_key=sheet_key,
         )
 
 

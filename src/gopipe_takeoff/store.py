@@ -412,3 +412,50 @@ def revoke_learned_alias(org_slug: str, raw: str, locale: str = "ja") -> bool:
         prefer="return=minimal",
     )
     return True
+
+# --- 指した指示を覚える（箇所・色） ------------------------------------------
+
+
+def save_pick_instruction(
+    org_slug: str, *, kind: str, ref: str, payload: dict,
+    sheet_key: str = "", note: str | None = None,
+) -> bool:
+    """人が指した指示を1件覚える（同じ鍵は上書き）。
+
+    kind='region' は「この図面の型のここを拾う」、kind='color' は「この色はこう拾う」。
+    共通辞書には流用しない。色の意味と同じく、会社ごとにしか決まらないため。
+    """
+    org_id = ensure_org(org_slug, org_slug)
+    _req(
+        "POST", "pick_instructions",
+        body=[{"org_id": org_id, "kind": kind, "sheet_key": sheet_key or "",
+               "ref": ref, "payload": payload, "note": note, "updated_at": "now()"}],
+        prefer="resolution=merge-duplicates,return=minimal",
+        params="?on_conflict=org_id,kind,sheet_key,ref",
+    )
+    return True
+
+
+def load_pick_instructions(org_slug: str, *, kind: str = "", sheet_key: str | None = None) -> list[dict]:
+    """覚えている指示を返す。
+
+    sheet_key を渡すと「その図面の型」と「全図面向け（空文字）」の両方を返す。
+    図面ごとの指示だけにすると、会社共通の決め事（この色は既存流用、等）が毎回消える。
+    """
+    org_id = ensure_org(org_slug, org_slug)
+    q = f"?org_id=eq.{org_id}&select=kind,sheet_key,ref,payload,hits,note&order=updated_at.desc"
+    if kind:
+        q += f"&kind=eq.{kind}"
+    if sheet_key is not None:
+        key = urllib.parse.quote(sheet_key or "")
+        q += f"&or=(sheet_key.eq.{key},sheet_key.eq.)"
+    return _req("GET", "pick_instructions", params=q) or []
+
+
+def delete_pick_instruction(org_slug: str, *, kind: str, ref: str, sheet_key: str = "") -> bool:
+    org_id = ensure_org(org_slug, org_slug)
+    _req("DELETE", "pick_instructions",
+         params=(f"?org_id=eq.{org_id}&kind=eq.{kind}"
+                 f"&sheet_key=eq.{urllib.parse.quote(sheet_key or '')}"
+                 f"&ref=eq.{urllib.parse.quote(ref)}"))
+    return True

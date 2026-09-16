@@ -14,6 +14,13 @@ import type { TakeoffItem } from "@/lib/gopipe";
 
 type Gap = { item: string; reason: string; action: string; pages: number[] };
 type Tool = "range" | "color" | "duct" | "symbol";
+/** 覚えている指示。箇所（前回どこを拾ったか）と色（この色はこう拾う）。 */
+type Saved = {
+  kind: "region" | "color";
+  sheet_key: string;
+  ref: string;
+  payload: Record<string, string | number>;
+};
 /** 指した1点の結果。色・ダクト・記号で中身が変わる。 */
 type Point = {
   id: number;
@@ -49,6 +56,10 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
   const [tool, setTool] = useState<Tool>("range");
   const [points, setPoints] = useState<Point[]>([]);
   const [meaning, setMeaning] = useState<Record<string, string>>({});
+  const [sheetKey, setSheetKey] = useState("");
+  const [saved, setSaved] = useState<Saved[]>([]);
+  // 色をどう拾うか（名前・単位・数える/長さ/拾わない）。名前だけでは数量にならない。
+  const [rule, setRule] = useState<Record<string, { name: string; action: string; unit: string }>>({});
   const boxRef = useRef<HTMLDivElement>(null);
 
   const busyLabel =
@@ -75,6 +86,9 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error ?? "図面を開けませんでした");
       setPageCount(Number(res.headers.get("x-page-count") ?? 1));
+      const sk = res.headers.get("x-sheet-key") ?? "";
+      setSheetKey(sk);
+      loadSaved(sk);
       const blob = await res.blob();
       setImg((old) => {
         if (old) URL.revokeObjectURL(old);
@@ -87,6 +101,37 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
     } finally {
       setBusy("");
     }
+  }
+
+  /** この図面の型に覚えさせてある指示を読む。 */
+  async function loadSaved(sk: string) {
+    try {
+      const res = await fetch(`/api/instructions?sheetKey=${encodeURIComponent(sk)}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      setSaved(Array.isArray(data?.instructions) ? data.instructions : []);
+    } catch {
+      /* 覚えた指示が読めなくても拾い出しはできる */
+    }
+  }
+
+  /** 指示を覚えさせる（箇所／色）。 */
+  async function remember(kind: "region" | "color", payload: Record<string, unknown>) {
+    setError("");
+    const res = await fetch("/api/instructions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind, sheet_key: sheetKey, payload }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      setError(d?.error ?? "覚えられませんでした");
+      return false;
+    }
+    await loadSaved(sheetKey);
+    return true;
   }
 
   async function upload() {
@@ -344,6 +389,50 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
         )}
         {busy && <p className="mt-4 text-[14px] text-[var(--cyan)]">{busyLabel}</p>}
 
+        {img && saved.length > 0 && (
+          <section className="mt-5 rounded-[12px] border border-[var(--cyan)] bg-[rgba(86,204,242,0.06)] p-4">
+            <p className="m-0 mb-2 text-[14px] font-black text-[var(--cyan)]">
+              この様式の図面で覚えていること（{saved.length} 件）
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {saved.filter((v) => v.kind === "region").map((v) => (
+                <button
+                  key={v.ref}
+                  disabled={busy !== ""}
+                  onClick={() => {
+                    const b = v.payload as { page: number; x0: number; y0: number; x1: number; y1: number };
+                    setTool("range");
+                    setDrag({ x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 });
+                    if (Number(b.page) !== page) loadPage(path, Number(b.page) || 1);
+                  }}
+                  className="rounded-[9px] border border-[var(--cyan)] px-3 py-1.5 text-[12.5px] font-bold text-[var(--cyan)] disabled:opacity-40"
+                >
+                  前回の範囲を出す{v.payload?.label ? `（${v.payload.label}）` : ""}
+                </button>
+              ))}
+              {saved.filter((v) => v.kind === "color").map((v) => (
+                <span
+                  key={v.ref}
+                  className="inline-flex items-center gap-1.5 rounded-[9px] border border-[var(--line)] px-3 py-1.5 text-[12.5px]"
+                >
+                  <span
+                    className="inline-block h-3 w-3 rounded-sm border border-[var(--line)]"
+                    style={{ background: String(v.payload?.hex ?? "#fff") }}
+                  />
+                  <b>{String(v.payload?.name ?? "")}</b>
+                  <span className="text-[var(--mut)]">
+                    {v.payload?.action === "measure" ? "長さを測る"
+                      : v.payload?.action === "skip" ? "拾わない" : "数える"}
+                  </span>
+                </span>
+              ))}
+            </div>
+            <p className="mt-2 mb-0 text-[12px] text-[var(--mut)]">
+              色の指示は、次からの拾い出しに自動で効きます（結果に「覚えた色の指示で◯行」と出ます）。
+            </p>
+          </section>
+        )}
+
         {img && (
           <div className="mt-5">
             <div
@@ -468,17 +557,57 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
                     {p.note && <p className="m-0 mt-0.5 text-[12.5px] text-[var(--mut)]">{p.note}</p>}
                     {p.tool === "color" && hex && (
                       <div className="mt-2 flex flex-wrap items-center gap-2">
-                        {/* 色の意味は会社ごと図面ごとにしか決まらない。当てずに聞く。 */}
+                        {/* 色の意味は会社ごと図面ごとにしか決まらない。当てずに聞く。
+                            名前だけでは数量にならないので、拾い方も一緒に決める。 */}
                         <input
-                          value={meaning[hex] ?? ""}
-                          onChange={(e) => setMeaning((c) => ({ ...c, [hex]: e.target.value }))}
+                          value={rule[hex]?.name ?? meaning[hex] ?? ""}
+                          onChange={(e) =>
+                            setRule((c) => ({
+                              ...c,
+                              [hex]: { action: c[hex]?.action ?? "count", unit: c[hex]?.unit ?? "", name: e.target.value },
+                            }))
+                          }
                           placeholder="この色は何ですか（例: 還気ダクト・既存流用）"
                           className="min-w-0 flex-1 rounded-[8px] border border-[var(--line)] bg-[var(--navy2)] px-3 py-1.5 text-[13px] focus:border-[var(--cyan)] focus:outline-none"
                         />
+                        <select
+                          value={rule[hex]?.action ?? "count"}
+                          onChange={(e) =>
+                            setRule((c) => ({
+                              ...c,
+                              [hex]: { name: c[hex]?.name ?? (meaning[hex] ?? ""), unit: c[hex]?.unit ?? "", action: e.target.value },
+                            }))
+                          }
+                          className="rounded-[8px] border border-[var(--line)] bg-[var(--navy2)] px-2 py-1.5 text-[12.5px]"
+                        >
+                          <option value="count">数える（個）</option>
+                          <option value="measure">長さを測る（m）</option>
+                          <option value="skip">拾わない</option>
+                        </select>
                         <button
-                          onClick={() => rememberColor(hex)}
-                          disabled={!(meaning[hex] ?? "").trim()}
-                          className="rounded-[8px] border border-[var(--cyan)] px-3 py-1.5 text-[12.5px] font-bold text-[var(--cyan)] disabled:opacity-40"
+                          onClick={async () => {
+                            const r = rule[hex] ?? { name: meaning[hex] ?? "", action: "count", unit: "" };
+                            if (!r.name.trim() && r.action !== "skip") return;
+                            const ok = await remember("color", {
+                              hex, name: r.name.trim() || "拾わない色", action: r.action, unit: r.unit,
+                            });
+                            if (ok) {
+                              // 色の呼び名は既存の辞書にも残す（拾い出しの備考に出る）
+                              if (r.name.trim()) {
+                                fetch("/api/color-meanings", {
+                                  method: "POST",
+                                  headers: { "content-type": "application/json" },
+                                  body: JSON.stringify({ color: hex, meaning: r.name.trim() }),
+                                }).catch(() => {});
+                              }
+                              setPoints((cur) =>
+                                cur.map((q) =>
+                                  q.id === p.id ? { ...q, note: "覚えました。次の図面から効きます" } : q,
+                                ),
+                              );
+                            }
+                          }}
+                          className="rounded-[8px] border border-[var(--cyan)] px-3 py-1.5 text-[12.5px] font-bold text-[var(--cyan)]"
                         >
                           覚えさせる
                         </button>
@@ -532,6 +661,16 @@ export default function Picker({ orgSlug, orgName }: { orgSlug: string; orgName:
                 )}
               </div>
             )}
+            <div className="mt-2">
+              <button
+                onClick={() =>
+                  remember("region", { page: p.page, ...p.box, label: p.label })
+                }
+                className="rounded-[8px] border border-[var(--cyan)] px-3 py-1.5 text-[12.5px] font-bold text-[var(--cyan)]"
+              >
+                この範囲を覚えさせる
+              </button>
+            </div>
             {p.gaps.length > 0 && (
               <ul className="mt-3 mb-0 list-none space-y-1 p-0 text-[12.5px] text-[#ffab33]">
                 {p.gaps.map((g, i) => (

@@ -212,3 +212,38 @@ def test_pick_duct_says_why_when_there_is_no_fill():
     body = res.json()
     assert body["items"] == []
     assert "塗られた図形がありません" in body["note"]
+
+
+# --- 覚えた指示 --------------------------------------------------------------
+
+
+def test_instructions_need_a_key():
+    """他社の覚えた指示を無認証で覗けない。"""
+    assert client.get("/instructions?org_slug=x").status_code in (401, 503)
+
+
+def test_instruction_refuses_an_unreadable_color():
+    import os
+
+    os.environ["GOPIPE_API_KEY"] = "test-key"
+    res = client.post("/instructions", json={"org_slug": "x", "kind": "color",
+                                             "payload": {"hex": "あお", "name": "青"}},
+                      headers={"x-gopipe-key": "test-key"})
+    assert res.status_code in (400, 503)
+
+
+def test_instruction_refuses_an_unknown_kind():
+    import os
+
+    os.environ["GOPIPE_API_KEY"] = "test-key"
+    res = client.post("/instructions", json={"org_slug": "x", "kind": "flavor", "payload": {}},
+                      headers={"x-gopipe-key": "test-key"})
+    assert res.status_code == 400
+
+
+def test_page_png_carries_the_sheet_key():
+    """画面が「図面の型」を持ち回れること（覚えた指示を引く鍵）。"""
+    res = client.post("/page_png", data={"page": "1", "dpi": "60"},
+                      files={"file": ("d.pdf", _pdf_bytes(), "application/pdf")})
+    assert res.status_code == 200
+    assert "x-sheet-key" in res.headers
