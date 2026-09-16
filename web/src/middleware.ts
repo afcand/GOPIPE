@@ -34,6 +34,7 @@ export const config = {
     "/app/:path*",
     "/login",
     "/api/run",
+    "/api/page",
     "/api/learn",
     "/api/items",
     "/api/items/rows",
